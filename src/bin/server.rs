@@ -20,6 +20,9 @@ enum Event {
         name: String,
         sender: Sender<String>,
     },
+    PeerDisconnected {
+        name: String,
+    },
     Message {
         from: String,
         to: Vec<String>,
@@ -46,7 +49,7 @@ async fn main() -> Result<()> {
 
     // Set up broker
     let (broker_sender, broker_receiver) = mpsc::unbounded_channel();
-    let _broker_handle = task::spawn(broker_loop(broker_receiver));
+    task::spawn(broker_loop(broker_receiver));
 
     // Listen and handle incoming connections
     let mut listener = TcpListener::bind(socket_addr).await?;
@@ -56,8 +59,6 @@ async fn main() -> Result<()> {
         println!("Accepting from: {}", stream.peer_addr()?);
         spawn_and_log_error(handle_connection(broker_sender.clone(), stream));
     }
-
-    Ok(())
 }
 
 fn spawn_and_log_error<F>(fut: F) -> task::JoinHandle<()>
@@ -108,12 +109,22 @@ async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<(
             message_opt = receiver.recv() => match message_opt {
                 Some(message) => {
                     buffered.write_all(message.as_bytes()).await?;
+                    if !message.ends_with('\n') {
+                        buffered.write_all(b"\n").await?;
+                    }
                     buffered.flush().await?;
                 },
                 None => continue,
             },
         }
     }
+
+    broker
+        .send(Event::PeerDisconnected { name: name.clone() })
+        .unwrap();
+    drop(broker);
+    println!("{} disconnected", name);
+
     Ok(())
 }
 
@@ -145,10 +156,18 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
     while let Some(event) = events.next().await {
         match event {
             Event::Message { from, to, msg } => {
+                // Format message to client
+                let msg = format!("from {}: {}", from, msg);
                 for addr in to {
-                    if let Some(peer) = peers.get_mut(&addr) {
-                        let msg = format!("from {}: {}", from, msg);
-                        peer.send(msg)?
+                    match peers.get_mut(&addr) {
+                        Some(peer) => peer.send(msg.clone())?,
+                        None => {
+                            // Notify sender that one of the recipients wasn't found
+                            println!("{} not found", addr);
+                            if let Some(sender) = peers.get_mut(&from) {
+                                sender.send(format!("from server: no client '{}' found", addr))?;
+                            }
+                        }
                     }
                 }
             }
@@ -160,7 +179,16 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
                     }
                 };
             }
+            Event::PeerDisconnected { name } => {
+                peers.remove(&name);
+                for sender in peers.values() {
+                    sender.send(format!("client {} disconnected", name))?;
+                }
+            }
         }
     }
+
+    drop(peers);
+
     Ok(())
 }
