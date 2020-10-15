@@ -24,12 +24,18 @@ async fn main() -> Result<()> {
         .next()
         .unwrap();
 
+    // Connect to server
     let stream = TcpStream::connect(socket_addr).await?;
+
+    // Set up I/O
     let mut buffered = BufStream::new(stream);
     let mut line = String::new();
-    let mut lines_from_stdin = BufReader::new(stdin()).lines().fuse(); // 2
+    let mut lines_from_stdin = BufReader::new(stdin()).lines().fuse();
+
+    // Event loop
     loop {
         select! {
+            // Read from network
             result = buffered.read_line(&mut line) => {
                 match result {
                     Ok(0) => break,
@@ -37,6 +43,8 @@ async fn main() -> Result<()> {
                     Err(error) => Err(error)?,
                 };
             },
+
+            // Read from stdin
             line = lines_from_stdin.next() => match line {
                 Some(line) => {
                     let line = line?;
