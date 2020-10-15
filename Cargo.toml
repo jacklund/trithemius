@@ -12,4 +12,4 @@ clap = "2.33.3"
 
 [dependencies.tokio]
 version = "0.2.22"
-features = ["rt-threaded", "rt-core", "macros", "tcp", "io-util", "sync", "stream"]
+features = ["rt-threaded", "rt-core", "macros", "tcp", "io-util", "io-std", "sync", "stream"]
