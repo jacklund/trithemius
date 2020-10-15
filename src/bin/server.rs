@@ -107,10 +107,8 @@ async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<(
             // Handle message from broker
             message_opt = receiver.recv() => match message_opt {
                 Some(message) => {
-                    println!("{}: Got message from broker, sending: {}", name, message);
                     buffered.write_all(message.as_bytes()).await?;
                     buffered.flush().await?;
-                    println!("{}: Sent message {}", name, message);
                 },
                 None => continue,
             },
@@ -121,7 +119,6 @@ async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<(
 
 // Handle message from client
 async fn handle_message(broker: &Sender<Event>, name: &str, line: &str) -> Result<()> {
-    println!("{}: Read line: {}", name, line);
     let (dest, msg) = match line.find(':') {
         None => return Ok(()),
         Some(idx) => (&line[..idx], line[idx + 1..].to_string()),
@@ -130,7 +127,6 @@ async fn handle_message(broker: &Sender<Event>, name: &str, line: &str) -> Resul
         .split(',')
         .map(|name| name.trim().to_string())
         .collect();
-    println!("{}: Sending {} to {:?}", name, msg, dest);
 
     broker
         .send(Event::Message {
@@ -149,7 +145,6 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
     while let Some(event) = events.next().await {
         match event {
             Event::Message { from, to, msg } => {
-                println!("Broker got message event: {}, {:?}, {}", from, to, msg);
                 for addr in to {
                     if let Some(peer) = peers.get_mut(&addr) {
                         let msg = format!("from {}: {}", from, msg);
@@ -158,7 +153,6 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
                 }
             }
             Event::NewPeer { name, sender } => {
-                println!("Got new peer event: {}", name);
                 match peers.entry(name) {
                     Entry::Occupied(..) => (),
                     Entry::Vacant(entry) => {
