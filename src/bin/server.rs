@@ -25,7 +25,7 @@ enum Event {
     },
     Message {
         from: String,
-        to: Vec<String>,
+        to: Option<Vec<String>>, // None means broadcast
         msg: String,
     },
 }
@@ -129,14 +129,19 @@ async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<(
 
 // Handle message from client
 async fn handle_message(broker: &Sender<Event>, name: &str, line: &str) -> Result<()> {
+    // Parse destination from input line
     let (dest, msg) = match line.find(':') {
-        None => return Ok(()),
-        Some(idx) => (&line[..idx], line[idx + 1..].to_string()),
+        None => (None, line.to_string()), // No dest, broadcast
+        Some(idx) => (
+            Some(
+                line[..idx]
+                    .split(',')
+                    .map(|name| name.trim().to_string())
+                    .collect::<Vec<String>>(),
+            ),
+            line[idx + 1..].to_string(),
+        ),
     };
-    let dest: Vec<String> = dest
-        .split(',')
-        .map(|name| name.trim().to_string())
-        .collect();
 
     broker
         .send(Event::Message {
@@ -157,18 +162,32 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
             Event::Message { from, to, msg } => {
                 // Format message to client
                 let msg = format!("from {}: {}", from, msg);
-                for addr in to {
-                    match peers.get_mut(&addr) {
-                        Some(peer) => peer.send(msg.clone())?,
-                        None => {
-                            // Notify sender that one of the recipients wasn't found
-                            println!("{} not found", addr);
-                            if let Some(sender) = peers.get_mut(&from) {
-                                sender.send(format!("from server: no client '{}' found", addr))?;
+                match to {
+                    Some(to) => {
+                        for addr in to {
+                            match peers.get_mut(&addr) {
+                                Some(peer) => peer.send(msg.clone())?,
+                                None => {
+                                    // Notify sender that one of the recipients wasn't found
+                                    println!("{} not found", addr);
+                                    if let Some(sender) = peers.get_mut(&from) {
+                                        sender.send(format!(
+                                            "from server: no client '{}' found",
+                                            addr
+                                        ))?;
+                                    }
+                                }
                             }
                         }
                     }
-                }
+                    None => {
+                        for (name, peer) in peers.iter() {
+                            if *name != from {
+                                peer.send(msg.clone())?;
+                            }
+                        }
+                    }
+                };
             }
             Event::NewPeer { name, sender } => {
                 match peers.entry(name) {
