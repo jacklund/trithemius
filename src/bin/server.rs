@@ -52,10 +52,9 @@ async fn main() -> Result<()> {
     task::spawn(broker_loop(broker_receiver));
 
     // Listen and handle incoming connections
-    let mut listener = TcpListener::bind(socket_addr).await?;
-    let mut incoming = listener.incoming();
-    while let Some(stream) = incoming.next().await {
-        let stream = stream?;
+    let listener = TcpListener::bind(socket_addr).await?;
+    loop {
+        let (stream, _) = listener.accept().await?;
         println!("Accepting from: {}", stream.peer_addr()?);
         spawn_and_log_error(handle_connection(broker_sender.clone(), stream));
     }
