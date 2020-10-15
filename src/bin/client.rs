@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
             result = buffered.read_line(&mut line) => {
                 match result {
                     Ok(0) => break,
-                    Ok(_) => println!("{}", line),
+                    Ok(_) => print!("{}", line),
                     Err(error) => Err(error)?,
                 };
             },
