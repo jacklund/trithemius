@@ -130,7 +130,6 @@ async fn handle_message(broker: &Sender<Event>, name: &str, line: &str) -> Resul
         .split(',')
         .map(|name| name.trim().to_string())
         .collect();
-    let msg: String = msg.to_string();
     println!("{}: Sending {} to {:?}", name, msg, dest);
 
     broker
