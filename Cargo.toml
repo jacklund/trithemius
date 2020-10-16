@@ -10,6 +10,9 @@ edition = "2018"
 repl-rs = "0.2.4"
 clap = "2.33.3"
 futures = "0.3.6"
+sodiumoxide = "0.2.6"
+rpassword = "5.0.0"
+dirs = "3.0.1"
 
 [dependencies.tokio]
 version = "0.3.0"

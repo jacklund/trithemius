@@ -9,6 +9,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    sodiumoxide::init().unwrap();
     let matches = clap_app!(myapp =>
         (version: "0.1.0")
         (author: "Jack Lund <jackl@geekheads.net>")
@@ -16,6 +17,11 @@ async fn main() -> Result<()> {
         (@arg ADDR: +required "Address to connect to")
     )
     .get_matches();
+
+    let password = rpassword::read_password_from_tty(Some("password: "))?;
+    let key = trithemius::read_key_from_keyfile(&password)?;
+
+    println!("{:?}", key.as_ref());
 
     let socket_addr = matches
         .value_of("ADDR")
