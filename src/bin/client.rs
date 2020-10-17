@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
         SymmetricalMessagePack::<Message>::default(),
     );
 
+    // Send identity
     framed
         .send(Message::Identity(matches.value_of("NAME").unwrap().into()))
         .await?;
@@ -73,6 +74,7 @@ async fn main() -> Result<()> {
             line = lines_from_stdin.next() => match line {
                 Some(line) => {
                     let line = line?;
+                    // Parse the recipients
                     let (dest, msg) = match line.find(':') {
                         None => (None, line.to_string()), // No dest, broadcast
                         Some(idx) => (
@@ -85,6 +87,7 @@ async fn main() -> Result<()> {
                             line[idx + 1..].trim().to_string(),
                         ),
                     };
+                    // Send it
                     framed.send(Message::ChatMessage { sender: None, recipients: dest, message: msg.as_bytes().to_vec() }).await?;
                 }
                 None => break,

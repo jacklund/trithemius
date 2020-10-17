@@ -1,10 +1,9 @@
 use clap::clap_app;
 use futures::stream::StreamExt;
-use futures::SinkExt;
+use futures::{SinkExt, Stream};
 use std::collections::{hash_map::Entry, HashMap};
 use std::future::Future;
 use std::net::ToSocketAddrs;
-use tokio::io::BufStream;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::mpsc;
@@ -69,25 +68,30 @@ where
     })
 }
 
-async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<()> {
-    // Set up network I/O
-    let buffered = BufStream::new(stream);
-    let mut framed = tokio_serde::SymmetricallyFramed::new(
-        tokio_util::codec::Framed::new(buffered.into_inner(), tokio_util::codec::BytesCodec::new()),
-        SymmetricalMessagePack::<Message>::default(),
-    );
-
-    // Read client name
-    println!("reading name");
-    let name = match framed.next().await {
-        Some(Ok(Message::Identity(name))) => name,
+async fn read_client_identity<R>(framed: &mut R) -> Result<String>
+where
+    R: Stream<Item = std::result::Result<Message, std::io::Error>> + std::marker::Unpin,
+{
+    match framed.next().await {
+        Some(Ok(Message::Identity(name))) => Ok(name),
         Some(Ok(something)) => {
             println!("{:?}", something);
             panic!("Unexpected message type");
         }
         Some(Err(error)) => Err(error)?,
-        None => return Ok(()),
-    };
+        None => return Ok("".into()),
+    }
+}
+
+async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<()> {
+    // Set up network I/O
+    let mut framed = tokio_serde::SymmetricallyFramed::new(
+        tokio_util::codec::Framed::new(stream, tokio_util::codec::BytesCodec::new()),
+        SymmetricalMessagePack::<Message>::default(),
+    );
+
+    // Read client name
+    let name = read_client_identity(&mut framed).await?;
     println!("{} connected", name);
 
     // Inform broker of new client
@@ -141,10 +145,9 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
                         ref sender,
                         ref recipients,
                         message: ref _msg,
-                    } =>
-                    // Format message to client
-                    {
+                    } => {
                         match recipients {
+                            // Send to recipients directly
                             Some(recipients) => {
                                 for addr in recipients {
                                     match peers.get_mut(addr) {
@@ -164,6 +167,7 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
                                     }
                                 }
                             }
+                            // Broadcast
                             None => {
                                 for (name, peer) in peers.iter() {
                                     if *name != sender.clone().unwrap() {
