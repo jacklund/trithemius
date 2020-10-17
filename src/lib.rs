@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate serde_derive;
 
-use sodiumoxide::crypto::{pwhash, secretbox, secretstream};
+use sodiumoxide::crypto::{pwhash, secretbox};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 
@@ -14,23 +14,31 @@ pub enum Message {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
         message: Vec<u8>,
+        nonce: Vec<u8>,
     },
     ErrorMessage(String),
 }
 
 impl Message {
-    pub fn new_chat_message(recipients: Option<Vec<String>>, message: &str) -> Self {
+    pub fn new_chat_message(
+        key: &secretbox::Key,
+        recipients: Option<Vec<String>>,
+        message: &str,
+    ) -> Self {
+        let nonce = secretbox::gen_nonce();
+        let encrypted = secretbox::seal(message.as_bytes(), &nonce, key);
         Self::ChatMessage {
             sender: None,
             recipients,
-            message: message.as_bytes().to_vec(),
+            message: encrypted,
+            nonce: nonce.as_ref().to_vec(),
         }
     }
 }
 
 // TODO: Add unit tests
 // TODO: Remove unwraps and add error messages
-pub fn read_key_from_keyfile(password: &str) -> Result<secretstream::Key> {
+pub fn read_key_from_keyfile(password: &str) -> Result<secretbox::Key> {
     let mut keyfile = dirs::home_dir().unwrap();
     keyfile.push(".trithemius");
     Ok(match File::open(&keyfile) {
@@ -41,7 +49,7 @@ pub fn read_key_from_keyfile(password: &str) -> Result<secretstream::Key> {
             let salt = pwhash::Salt::from_slice(&data.split_off(secretbox::NONCEBYTES)).unwrap();
             let nonce = secretbox::Nonce::from_slice(&data).unwrap();
             let key_encryption_key = derive_file_encryption_key(password, &salt)?;
-            secretstream::Key::from_slice(
+            secretbox::Key::from_slice(
                 &secretbox::open(&encrypted, &nonce, &key_encryption_key).unwrap(),
             )
             .unwrap()
@@ -49,7 +57,7 @@ pub fn read_key_from_keyfile(password: &str) -> Result<secretstream::Key> {
         Err(error) => match error.kind() {
             ErrorKind::NotFound => {
                 let salt = pwhash::gen_salt();
-                let key = secretstream::gen_key();
+                let key = secretbox::gen_key();
                 let key_encryption_key = derive_file_encryption_key(password, &salt)?;
                 let nonce = secretbox::gen_nonce();
                 let encrypted = secretbox::seal(key.as_ref(), &nonce, &key_encryption_key);

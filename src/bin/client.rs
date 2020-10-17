@@ -1,5 +1,6 @@
 use clap::clap_app;
 use futures::SinkExt;
+use sodiumoxide::crypto::secretbox;
 use std::net::ToSocketAddrs;
 use tokio::io::{stdin, AsyncBufReadExt, BufReader, BufStream};
 use tokio::net::TcpStream;
@@ -25,7 +26,7 @@ async fn main() -> Result<()> {
     .get_matches();
 
     let password = rpassword::read_password_from_tty(Some("password: "))?;
-    let _key = trithemius::read_key_from_keyfile(&password)?;
+    let key = trithemius::read_key_from_keyfile(&password)?;
 
     // println!("{:?}", key.as_ref());
 
@@ -60,8 +61,9 @@ async fn main() -> Result<()> {
             // Read from network
             message_opt = framed.next() => match message_opt {
                 Some(Ok(message)) => match message {
-                    Message::ChatMessage { sender, recipients: _, message } => {
-                        println!("from {}: {}", sender.unwrap(), std::str::from_utf8(&message)?);
+                    Message::ChatMessage { sender, recipients: _, message, nonce } => {
+                        let plaintext = secretbox::open(&message, &secretbox::Nonce::from_slice(&nonce).unwrap(), &key).unwrap();
+                        println!("from {}: {}", sender.unwrap(), std::str::from_utf8(&plaintext)?);
                     },
                     Message::ErrorMessage(error) => println!("error: {}", error),
                     something => panic!("Unexpected message: {:?}", something),
@@ -87,8 +89,11 @@ async fn main() -> Result<()> {
                             line[idx + 1..].trim().to_string(),
                         ),
                     };
+                    // Encrypt the message
+                    let message = Message::new_chat_message(&key, dest, &msg);
+
                     // Send it
-                    framed.send(Message::ChatMessage { sender: None, recipients: dest, message: msg.as_bytes().to_vec() }).await?;
+                    framed.send(message).await?;
                 }
                 None => break,
             }

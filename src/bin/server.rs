@@ -110,7 +110,7 @@ async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<(
             message_opt = framed.next() => match message_opt {
                 Some(Ok(message)) => match message {
                     Message::ErrorMessage(_) => broker.send(Event::Message(message))?,
-                    Message::ChatMessage{ sender: _, recipients, message } => broker.send(Event::Message(Message::ChatMessage{ sender: Some(name.clone()), recipients, message }))?,
+                    Message::ChatMessage{ sender: _, recipients, message, nonce } => broker.send(Event::Message(Message::ChatMessage{ sender: Some(name.clone()), recipients, message, nonce }))?,
                     something => panic!("Unexpected message {:?}", something),
                 },
                 Some(Err(error)) => Err(error)?,
@@ -145,7 +145,9 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
                         ref sender,
                         ref recipients,
                         message: ref _msg,
+                        nonce: ref _nonce,
                     } => {
+                        println!("Message: {:?}", message);
                         match recipients {
                             // Send to recipients directly
                             Some(recipients) => {
