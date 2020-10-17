@@ -13,7 +13,19 @@ futures = "0.3.6"
 sodiumoxide = "0.2.6"
 rpassword = "5.0.0"
 dirs = "3.0.1"
+serde = "1.0.117"
+serde_derive = "1.0.117"
+rmp-serde = "0.14.4"
+
+[dependencies.tokio-serde]
+version = "0.6.1"
+git = "https://github.com/jacklund/tokio-serde.git"
+features = ["messagepack"]
 
 [dependencies.tokio]
 version = "0.3.0"
+features = ["full"]
+
+[dependencies.tokio-util]
+version = "0.4.0"
 features = ["full"]

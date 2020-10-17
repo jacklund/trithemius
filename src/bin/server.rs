@@ -1,14 +1,16 @@
 use clap::clap_app;
+use futures::stream::StreamExt;
+use futures::SinkExt;
 use std::collections::{hash_map::Entry, HashMap};
 use std::future::Future;
 use std::net::ToSocketAddrs;
 use tokio::io::BufStream;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::prelude::*;
 use tokio::select;
-use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task;
+use tokio_serde::formats::SymmetricalMessagePack;
+use trithemius::Message;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type Sender<T> = mpsc::UnboundedSender<T>;
@@ -18,16 +20,12 @@ type Receiver<T> = mpsc::UnboundedReceiver<T>;
 enum Event {
     NewPeer {
         name: String,
-        sender: Sender<String>,
+        sender: Sender<Message>,
     },
     PeerDisconnected {
         name: String,
     },
-    Message {
-        from: String,
-        to: Option<Vec<String>>, // None means broadcast
-        msg: String,
-    },
+    Message(Message),
 }
 
 #[tokio::main]
@@ -72,15 +70,25 @@ where
 }
 
 async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<()> {
-    // Set up input buffer
-    let mut buffered = BufStream::new(stream);
-    let mut line = String::new();
+    // Set up network I/O
+    let buffered = BufStream::new(stream);
+    let mut framed = tokio_serde::SymmetricallyFramed::new(
+        tokio_util::codec::Framed::new(buffered.into_inner(), tokio_util::codec::BytesCodec::new()),
+        SymmetricalMessagePack::<Message>::default(),
+    );
 
     // Read client name
-    buffered.read_line(&mut line).await?;
-    let name = line.trim_end().to_string();
+    println!("reading name");
+    let name = match framed.next().await {
+        Some(Ok(Message::Identity(name))) => name,
+        Some(Ok(something)) => {
+            println!("{:?}", something);
+            panic!("Unexpected message type");
+        }
+        Some(Err(error)) => Err(error)?,
+        None => return Ok(()),
+    };
     println!("{} connected", name);
-    line.clear();
 
     // Inform broker of new client
     let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -95,25 +103,20 @@ async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<(
     loop {
         select! {
             // Handle message coming from client
-            result = buffered.read_line(&mut line) => {
-                match result {
-                    Ok(0) => break,
-                    Ok(_) => handle_message(&broker, &name, &line),
-                    Err(error) => Err(error)?,
-                }.await?;
-                line.clear();
+            message_opt = framed.next() => match message_opt {
+                Some(Ok(message)) => match message {
+                    Message::ErrorMessage(_) => broker.send(Event::Message(message))?,
+                    Message::ChatMessage{ sender: _, recipients, message } => broker.send(Event::Message(Message::ChatMessage{ sender: Some(name.clone()), recipients, message }))?,
+                    something => panic!("Unexpected message {:?}", something),
+                },
+                Some(Err(error)) => Err(error)?,
+                None => break,
             },
 
             // Handle message from broker
             message_opt = receiver.recv() => match message_opt {
-                Some(message) => {
-                    buffered.write_all(message.as_bytes()).await?;
-                    if !message.ends_with('\n') {
-                        buffered.write_all(b"\n").await?;
-                    }
-                    buffered.flush().await?;
-                },
-                None => continue,
+                Some(message) => framed.send(message).await?,
+                None => break,
             },
         }
     }
@@ -127,67 +130,51 @@ async fn handle_connection(broker: Sender<Event>, stream: TcpStream) -> Result<(
     Ok(())
 }
 
-// Handle message from client
-async fn handle_message(broker: &Sender<Event>, name: &str, line: &str) -> Result<()> {
-    // Parse destination from input line
-    let (dest, msg) = match line.find(':') {
-        None => (None, line.to_string()), // No dest, broadcast
-        Some(idx) => (
-            Some(
-                line[..idx]
-                    .split(',')
-                    .map(|name| name.trim().to_string())
-                    .collect::<Vec<String>>(),
-            ),
-            line[idx + 1..].to_string(),
-        ),
-    };
-
-    broker
-        .send(Event::Message {
-            from: name.to_string(),
-            to: dest,
-            msg,
-        })
-        .unwrap();
-
-    Ok(())
-}
-
 async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
-    let mut peers: HashMap<String, Sender<String>> = HashMap::new();
+    let mut peers: HashMap<String, Sender<Message>> = HashMap::new();
 
     while let Some(event) = events.next().await {
         match event {
-            Event::Message { from, to, msg } => {
-                // Format message to client
-                let msg = format!("from {}: {}", from, msg);
-                match to {
-                    Some(to) => {
-                        for addr in to {
-                            match peers.get_mut(&addr) {
-                                Some(peer) => peer.send(msg.clone())?,
-                                None => {
-                                    // Notify sender that one of the recipients wasn't found
-                                    println!("{} not found", addr);
-                                    if let Some(sender) = peers.get_mut(&from) {
-                                        sender.send(format!(
-                                            "from server: no client '{}' found",
-                                            addr
-                                        ))?;
+            Event::Message(message) => {
+                match message {
+                    Message::ChatMessage {
+                        ref sender,
+                        ref recipients,
+                        message: ref _msg,
+                    } =>
+                    // Format message to client
+                    {
+                        match recipients {
+                            Some(recipients) => {
+                                for addr in recipients {
+                                    match peers.get_mut(addr) {
+                                        Some(peer) => peer.send(message.clone())?,
+                                        None => {
+                                            // Notify sender that one of the recipients wasn't found
+                                            println!("{} not found", addr);
+                                            if let Some(sender) =
+                                                peers.get_mut(&sender.clone().unwrap())
+                                            {
+                                                sender.send(Message::ErrorMessage(format!(
+                                                    "from server: no client '{}' found",
+                                                    addr
+                                                )))?;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                for (name, peer) in peers.iter() {
+                                    if *name != sender.clone().unwrap() {
+                                        peer.send(message.clone())?;
                                     }
                                 }
                             }
                         }
                     }
-                    None => {
-                        for (name, peer) in peers.iter() {
-                            if *name != from {
-                                peer.send(msg.clone())?;
-                            }
-                        }
-                    }
-                };
+                    _ => panic!("Unexpected message type!"),
+                }
             }
             Event::NewPeer { name, sender } => {
                 match peers.entry(name) {
@@ -200,7 +187,10 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
             Event::PeerDisconnected { name } => {
                 peers.remove(&name);
                 for sender in peers.values() {
-                    sender.send(format!("client {} disconnected", name))?;
+                    sender.send(Message::ErrorMessage(format!(
+                        "client {} disconnected",
+                        name
+                    )))?;
                 }
             }
         }

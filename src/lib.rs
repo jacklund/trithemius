@@ -1,9 +1,35 @@
+#[macro_use]
+extern crate serde_derive;
+
 use sodiumoxide::crypto::{pwhash, secretbox, secretstream};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum Message {
+    Identity(String),
+    ChatMessage {
+        sender: Option<String>,
+        recipients: Option<Vec<String>>,
+        message: Vec<u8>,
+    },
+    ErrorMessage(String),
+}
+
+impl Message {
+    pub fn new_chat_message(recipients: Option<Vec<String>>, message: &str) -> Self {
+        Self::ChatMessage {
+            sender: None,
+            recipients,
+            message: message.as_bytes().to_vec(),
+        }
+    }
+}
+
+// TODO: Add unit tests
+// TODO: Remove unwraps and add error messages
 pub fn read_key_from_keyfile(password: &str) -> Result<secretstream::Key> {
     let mut keyfile = dirs::home_dir().unwrap();
     keyfile.push(".trithemius");
