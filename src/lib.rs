@@ -4,8 +4,13 @@ extern crate serde_derive;
 use sodiumoxide::crypto::{pwhash, secretbox};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
+use tokio::sync::mpsc;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+mod keyring;
+
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type Sender<T> = mpsc::UnboundedSender<T>;
+pub type Receiver<T> = mpsc::UnboundedReceiver<T>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Message {

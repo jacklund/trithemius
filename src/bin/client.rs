@@ -7,9 +7,7 @@ use tokio::net::TcpStream;
 use tokio::select;
 use tokio::stream::StreamExt;
 use tokio_serde::formats::SymmetricalMessagePack;
-use trithemius::Message;
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+use trithemius::{Message, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {

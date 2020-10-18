@@ -9,11 +9,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_serde::formats::SymmetricalMessagePack;
-use trithemius::Message;
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-type Sender<T> = mpsc::UnboundedSender<T>;
-type Receiver<T> = mpsc::UnboundedReceiver<T>;
+use trithemius::{Message, Receiver, Result, Sender};
 
 #[derive(Debug)]
 enum Event {
