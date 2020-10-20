@@ -1,12 +1,14 @@
 #[macro_use]
 extern crate serde_derive;
 
+use hex;
 use sodiumoxide::crypto::{pwhash, secretbox};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use tokio::sync::mpsc;
 
-mod keyring;
+pub mod client_connector;
+pub mod keyring;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub type Sender<T> = mpsc::UnboundedSender<T>;
@@ -85,4 +87,19 @@ fn derive_file_encryption_key(password: &str, salt: &pwhash::Salt) -> Result<sec
             .unwrap(),
     )
     .unwrap())
+}
+
+pub fn fingerprint(data: &[u8]) -> String {
+    let mut hexed = hex::encode(data);
+    let mut v = vec![];
+    loop {
+        let pair: String = hexed.drain(..2).collect();
+        v.push(pair);
+        if hexed.is_empty() {
+            break;
+        }
+        v.push(":".into());
+    }
+
+    v.into_iter().collect()
 }

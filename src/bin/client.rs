@@ -1,103 +1,122 @@
 use clap::clap_app;
-use futures::SinkExt;
 use sodiumoxide::crypto::secretbox;
 use std::net::ToSocketAddrs;
-use tokio::io::{stdin, AsyncBufReadExt, BufReader, BufStream};
-use tokio::net::TcpStream;
-use tokio::select;
-use tokio::stream::StreamExt;
-use tokio_serde::formats::SymmetricalMessagePack;
-use trithemius::{Message, Result};
+use trithemius::{client_connector::ClientConnector, keyring::KeyRing, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize crypto
     sodiumoxide::init().unwrap();
 
-    let matches = clap_app!(myapp =>
+    let app = clap_app!(myapp =>
         (version: "0.1.0")
         (author: "Jack Lund <jackl@geekheads.net>")
-        (about: "Encrypted chat")
-        (@arg ADDR: +required "Address to connect to")
-        (@arg NAME: +required "Name of user")
-    )
-    .get_matches();
+        (about: "Encrypted chat client")
+        (@setting SubcommandRequired)
+
+        (@subcommand connect =>
+         (about: "Connect to server")
+         (@arg ADDR: +required "Address to connect to")
+         (@arg NAME: +required "Name of identity"))
+
+        (@subcommand identity =>
+         (@setting SubcommandRequired)
+         (@subcommand add =>
+          (about: "Add identity")
+          (@arg NAME: +required "Name of identity"))
+         (@subcommand remove =>
+          (about: "Remove identity")
+          (@arg NAME: +required "Name of identity"))
+         (@subcommand list =>
+          (about: "List identities")))
+
+        (@subcommand key =>
+         (@setting SubcommandRequired)
+         (@subcommand add =>
+          (@arg NAME: +required "Server name"))
+         (@subcommand remove =>
+          (@arg NAME: +required "Server name"))
+         (@subcommand list =>
+          (about: "List server keys")))
+    );
+    let matches = app.clone().get_matches();
 
     let password = rpassword::read_password_from_tty(Some("password: "))?;
-    let key = trithemius::read_key_from_keyfile(&password)?;
+    let mut keyfile = dirs::home_dir().unwrap();
+    keyfile.push(".trithemius");
+    let (mut keyring, mut keyring_file) = KeyRing::read_from_file(&keyfile, &password)?;
 
-    // println!("{:?}", key.as_ref());
-
-    let socket_addr = matches
-        .value_of("ADDR")
-        .unwrap()
-        .to_socket_addrs()?
-        .next()
-        .unwrap();
-
-    // Connect to server
-    let stream = TcpStream::connect(socket_addr).await?;
-
-    // Set up terminal I/O
-    let mut lines_from_stdin = BufReader::new(stdin()).lines().fuse();
-
-    // Set up network I/O
-    let buffered = BufStream::new(stream);
-    let mut framed = tokio_serde::SymmetricallyFramed::new(
-        tokio_util::codec::Framed::new(buffered.into_inner(), tokio_util::codec::BytesCodec::new()),
-        SymmetricalMessagePack::<Message>::default(),
-    );
-
-    // Send identity
-    framed
-        .send(Message::Identity(matches.value_of("NAME").unwrap().into()))
-        .await?;
-
-    // Event loop
-    loop {
-        select! {
-            // Read from network
-            message_opt = framed.next() => match message_opt {
-                Some(Ok(message)) => match message {
-                    Message::ChatMessage { sender, recipients: _, message, nonce } => {
-                        let plaintext = secretbox::open(&message, &secretbox::Nonce::from_slice(&nonce).unwrap(), &key).unwrap();
-                        println!("from {}: {}", sender.unwrap(), std::str::from_utf8(&plaintext)?);
-                    },
-                    Message::ErrorMessage(error) => println!("error: {}", error),
-                    something => panic!("Unexpected message: {:?}", something),
-                },
-                Some(Err(error)) => Err(error)?,
-                None => break,
-            },
-
-            // Read from stdin
-            line = lines_from_stdin.next() => match line {
-                Some(line) => {
-                    let line = line?;
-                    // Parse the recipients
-                    let (dest, msg) = match line.find(':') {
-                        None => (None, line.to_string()), // No dest, broadcast
-                        Some(idx) => (
-                            Some(
-                                line[..idx]
-                                    .split(',')
-                                    .map(|name| name.trim().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                            line[idx + 1..].trim().to_string(),
-                        ),
-                    };
-                    // Encrypt the message
-                    let message = Message::new_chat_message(&key, dest, &msg);
-
-                    // Send it
-                    framed.send(message).await?;
-                }
-                None => break,
-            }
-
+    match matches.subcommand() {
+        ("connect", Some(connect_matches)) => {
+            let address = connect_matches.value_of("ADDR").unwrap();
+            let socket_addr = address.to_socket_addrs()?.next().unwrap();
+            let name = connect_matches.value_of("NAME").unwrap();
+            let key = match keyring.get_key(&address) {
+                Some(key) => key,
+                None => Err(format!(
+                    "Key for {} not found; '{} key add {}' to add key",
+                    name,
+                    app.get_name(),
+                    name
+                ))?,
+            };
+            ClientConnector::connect(socket_addr)
+                .await?
+                .handle_events(&key)
+                .await?;
         }
-    }
+        ("identity", Some(identity_matches)) => {
+            match identity_matches.subcommand() {
+                ("add", Some(add_matches)) => {
+                    let name = add_matches.value_of("NAME").unwrap();
+                    keyring.add_identity(&name)?;
+                    keyring.save(&mut keyring_file, &password)?;
+                    let identity = keyring.get_identity(&name).unwrap();
+                    println!(
+                        "Identity {} ({}) added",
+                        identity.get_name(),
+                        identity.get_fingerprint()
+                    );
+                }
+                ("remove", Some(remove_matches)) => {
+                    let name = remove_matches.value_of("NAME").unwrap();
+                    keyring.remove_identity(&name)?;
+                    keyring.save(&mut keyring_file, &password)?;
+                    println!("Identity {} removed", name);
+                }
+                ("list", Some(_)) => {
+                    println!("Identities:");
+                    for identity in keyring.get_identities() {
+                        println!("{}\t{}", identity.get_name(), identity.get_fingerprint());
+                    }
+                }
+                _ => panic!("Something went wrong"),
+            };
+        }
+        ("key", Some(key_matches)) => {
+            match key_matches.subcommand() {
+                ("add", Some(add_matches)) => {
+                    let name = add_matches.value_of("NAME").unwrap();
+                    keyring.add_key(&name, &secretbox::gen_key())?;
+                    keyring.save(&mut keyring_file, &password)?;
+                    let key = keyring.get_key(&name).unwrap();
+                    println!("Key {} ({}) added", key.get_name(), key.get_fingerprint());
+                }
+                ("remove", Some(remove_matches)) => {
+                    let name = remove_matches.value_of("NAME").unwrap();
+                    keyring.remove_key(&name)?;
+                    println!("Key {} removed from keyring", name);
+                }
+                ("list", Some(_)) => {
+                    for (name, key) in keyring.get_keys() {
+                        println!("{}\t{}", name, key.get_fingerprint());
+                    }
+                }
+                _ => panic!("Something went wrong"),
+            };
+        }
+        _ => (),
+    };
 
     Ok(())
 }

@@ -1,8 +1,8 @@
-use crate::{derive_file_encryption_key, Result};
+use crate::{derive_file_encryption_key, fingerprint, Result};
 use rmp_serde;
-use sodiumoxide::crypto::{box_, pwhash, secretbox};
+use sodiumoxide::crypto::{box_, hash, pwhash, secretbox};
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::Path;
 
@@ -19,14 +19,20 @@ pub struct Contact {
     public_keys: Vec<box_::PublicKey>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Key {
+    name: String,
+    key: secretbox::Key,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct KeyRing {
     identities: HashMap<String, Identity>,
     contacts: HashMap<String, Contact>,
-    keys: HashMap<String, secretbox::Key>,
+    keys: HashMap<String, Key>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct KeyRingFile {
     salt: Vec<u8>,
     nonce: Vec<u8>,
@@ -43,6 +49,37 @@ impl Identity {
             secret_key,
         }
     }
+
+    pub fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn get_fingerprint(&self) -> String {
+        let digest = hash::hash(self.public_key.as_ref());
+        fingerprint(&digest.as_ref()[..16])
+    }
+}
+
+impl Key {
+    pub fn new(name: &str, key: &secretbox::Key) -> Self {
+        Self {
+            name: name.into(),
+            key: key.clone(),
+        }
+    }
+
+    pub fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn get_key(&self) -> secretbox::Key {
+        self.key.clone()
+    }
+
+    pub fn get_fingerprint(&self) -> String {
+        let digest = hash::hash(self.key.as_ref());
+        fingerprint(&digest.as_ref()[..16])
+    }
 }
 
 impl KeyRingFile {
@@ -54,7 +91,7 @@ impl KeyRingFile {
         secretbox::Nonce::from_slice(&self.nonce).unwrap()
     }
 
-    pub fn read<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn read<P: AsRef<Path>>(path: P, password: &str) -> Result<Self> {
         let path_string = path.as_ref().to_str().unwrap().to_string();
         match File::open(path_string.clone()) {
             Ok(file) => {
@@ -63,11 +100,10 @@ impl KeyRingFile {
             }
             Err(error) => match error.kind() {
                 ErrorKind::NotFound => {
-                    File::create(path_string.clone())?;
                     let mut keyring_file = KeyRingFile::default();
-                    keyring_file.salt = pwhash::gen_salt().as_ref().to_vec();
-                    keyring_file.nonce = pwhash::gen_salt().as_ref().to_vec();
                     keyring_file.path = Some(path_string);
+                    let mut keyring = KeyRing::default();
+                    keyring.save(&mut keyring_file, password)?;
                     Ok(keyring_file)
                 }
                 _ => Err(error)?,
@@ -76,16 +112,30 @@ impl KeyRingFile {
     }
 
     pub fn save(&mut self, keyring: &KeyRing) -> Result<()> {
-        let mut file = File::open(self.path.clone().unwrap())?;
-        rmp_serde::encode::write(&mut file, &keyring)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(self.path.clone().unwrap())?;
+        rmp_serde::encode::write_named(&mut file, &self)?;
 
         Ok(())
     }
 }
 
+impl std::default::Default for KeyRingFile {
+    fn default() -> Self {
+        Self {
+            salt: pwhash::gen_salt().as_ref().to_vec(),
+            nonce: secretbox::gen_nonce().as_ref().to_vec(),
+            encrypted: vec![],
+            path: None,
+        }
+    }
+}
+
 impl KeyRing {
     pub fn read_from_file<P: AsRef<Path>>(path: &P, password: &str) -> Result<(Self, KeyRingFile)> {
-        let keyring_file = KeyRingFile::read(path)?;
+        let keyring_file = KeyRingFile::read(path, password)?;
         let file_encryption_key = derive_file_encryption_key(password, &keyring_file.get_salt())?;
         let decrypted = secretbox::open(
             &keyring_file.encrypted,
@@ -93,7 +143,7 @@ impl KeyRing {
             &file_encryption_key,
         )
         .unwrap();
-        let keyring: KeyRing = rmp_serde::from_slice(&decrypted)?;
+        let keyring: KeyRing = rmp_serde::from_read_ref::<[u8], KeyRing>(&decrypted)?;
         Ok((keyring, keyring_file))
     }
 
@@ -107,6 +157,10 @@ impl KeyRing {
         file.save(&self)?;
 
         Ok(())
+    }
+
+    pub fn get_identity(&self, name: &str) -> Option<&Identity> {
+        self.identities.get(name)
     }
 
     pub fn add_identity(&mut self, name: &str) -> Result<()> {
@@ -128,6 +182,14 @@ impl KeyRing {
         self.identities.remove(name.into());
 
         Ok(())
+    }
+
+    pub fn get_identities(&self) -> Vec<&Identity> {
+        self.identities.values().collect()
+    }
+
+    pub fn get_contact(&self, name: &str) -> Option<&Contact> {
+        self.contacts.get(name)
     }
 
     pub fn add_contact(&mut self, contact: &Contact) -> Result<()> {
@@ -153,19 +215,32 @@ impl KeyRing {
         Ok(())
     }
 
+    pub fn get_key(&self, name: &str) -> Option<&Key> {
+        self.keys.get(name)
+    }
+
+    pub fn get_keys(&self) -> Vec<(&String, &Key)> {
+        let mut ret = vec![];
+        for (name, key) in self.keys.iter() {
+            ret.push((name, key))
+        }
+
+        ret
+    }
+
     pub fn add_key(&mut self, name: &str, key: &secretbox::Key) -> Result<()> {
         if self.keys.contains_key(name) {
             Err(format!("Key {} already exists in keyring", name))?;
         }
 
-        self.keys.insert(name.into(), key.clone());
+        self.keys.insert(name.into(), Key::new(name, key));
 
         Ok(())
     }
 
     pub fn remove_key(&mut self, name: &str) -> Result<()> {
         if !self.keys.contains_key(name) {
-            Err(format!("Key {} not foundin keyring", name))?;
+            Err(format!("Key {} not found in keyring", name))?;
         }
 
         self.keys.remove(name);
