@@ -64,18 +64,21 @@ impl ClientConnector {
                     message,
                     nonce,
                 } => {
-                    let plaintext = secretbox::open(
+                    match secretbox::open(
                         &message,
                         &secretbox::Nonce::from_slice(&nonce).unwrap(),
                         &key.get_key(),
-                    )
-                    .unwrap();
-                    println!(
-                        "from {}: {}",
-                        sender.unwrap(),
-                        std::str::from_utf8(&plaintext)?
-                    );
-                    Ok(())
+                    ) {
+                        Ok(plaintext) => {
+                            println!(
+                                "from {}: {}",
+                                sender.unwrap_or("unknown sender".into()),
+                                std::str::from_utf8(&plaintext)?
+                            );
+                            Ok(())
+                        }
+                        Err(_) => Err(format!("Error decrypting message"))?,
+                    }
                 }
                 Message::ErrorMessage(error) => {
                     println!("error: {}", error);

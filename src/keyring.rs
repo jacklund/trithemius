@@ -1,11 +1,11 @@
 use crate::{derive_file_encryption_key, fingerprint, Result};
-use rmp_serde;
 use sodiumoxide::crypto::{box_, hash, pwhash, secretbox};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::Path;
 
+// TODO: Unit tests
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Identity {
     name: String,
@@ -111,7 +111,8 @@ impl KeyRingFile {
         }
     }
 
-    pub fn save(&mut self, keyring: &KeyRing) -> Result<()> {
+    pub fn save(&mut self, password: &str, keyring: &KeyRing) -> Result<()> {
+        self.encrypted = keyring.encrypt(password, &self.get_salt(), &self.get_nonce())?;
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -137,24 +138,35 @@ impl KeyRing {
     pub fn read_from_file<P: AsRef<Path>>(path: &P, password: &str) -> Result<(Self, KeyRingFile)> {
         let keyring_file = KeyRingFile::read(path, password)?;
         let file_encryption_key = derive_file_encryption_key(password, &keyring_file.get_salt())?;
-        let decrypted = secretbox::open(
+        match secretbox::open(
             &keyring_file.encrypted,
             &keyring_file.get_nonce(),
             &file_encryption_key,
-        )
-        .unwrap();
-        let keyring: KeyRing = rmp_serde::from_read_ref::<[u8], KeyRing>(&decrypted)?;
-        Ok((keyring, keyring_file))
+        ) {
+            Ok(decrypted) => {
+                let keyring: KeyRing = rmp_serde::from_read_ref::<[u8], KeyRing>(&decrypted)?;
+                Ok((keyring, keyring_file))
+            }
+            Err(_) => Err(format!("Error decrypting keyring"))?,
+        }
+    }
+
+    fn encrypt(
+        &self,
+        password: &str,
+        salt: &pwhash::Salt,
+        nonce: &secretbox::Nonce,
+    ) -> Result<Vec<u8>> {
+        let file_encryption_key = derive_file_encryption_key(password, salt)?;
+        Ok(secretbox::seal(
+            &rmp_serde::to_vec(self)?,
+            nonce,
+            &file_encryption_key,
+        ))
     }
 
     pub fn save(&mut self, file: &mut KeyRingFile, password: &str) -> Result<()> {
-        let file_encryption_key = derive_file_encryption_key(password, &file.get_salt())?;
-        file.encrypted = secretbox::seal(
-            &rmp_serde::to_vec(self)?,
-            &file.get_nonce(),
-            &file_encryption_key,
-        );
-        file.save(&self)?;
+        file.save(password, self)?;
 
         Ok(())
     }
@@ -179,7 +191,7 @@ impl KeyRing {
             Err(format!("Identity {} not found in keyring", name))?;
         }
 
-        self.identities.remove(name.into());
+        self.identities.remove(name);
 
         Ok(())
     }

@@ -1,7 +1,6 @@
 #[macro_use]
 extern crate serde_derive;
 
-use hex;
 use sodiumoxide::crypto::{pwhash, secretbox};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};

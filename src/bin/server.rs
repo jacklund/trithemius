@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
 
     // Set up broker
     let (broker_sender, broker_receiver) = mpsc::unbounded_channel();
-    task::spawn(broker_loop(broker_receiver));
+    spawn_and_log_error(broker_loop(broker_receiver));
 
     // Listen and handle incoming connections
     let listener = TcpListener::bind(socket_addr).await?;
@@ -75,7 +75,7 @@ where
             panic!("Unexpected message type");
         }
         Some(Err(error)) => Err(error)?,
-        None => return Ok("".into()),
+        None => Ok("".into()),
     }
 }
 
@@ -135,51 +135,9 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
 
     while let Some(event) = events.next().await {
         match event {
-            Event::Message(message) => {
-                match message {
-                    Message::ChatMessage {
-                        ref sender,
-                        ref recipients,
-                        message: ref _msg,
-                        nonce: ref _nonce,
-                    } => {
-                        println!("Message: {:?}", message);
-                        match recipients {
-                            // Send to recipients directly
-                            Some(recipients) => {
-                                for addr in recipients {
-                                    match peers.get_mut(addr) {
-                                        Some(peer) => peer.send(message.clone())?,
-                                        None => {
-                                            // Notify sender that one of the recipients wasn't found
-                                            println!("{} not found", addr);
-                                            if let Some(sender) =
-                                                peers.get_mut(&sender.clone().unwrap())
-                                            {
-                                                sender.send(Message::ErrorMessage(format!(
-                                                    "from server: no client '{}' found",
-                                                    addr
-                                                )))?;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            // Broadcast
-                            None => {
-                                for (name, peer) in peers.iter() {
-                                    if *name != sender.clone().unwrap() {
-                                        peer.send(message.clone())?;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => panic!("Unexpected message type!"),
-                }
-            }
+            Event::Message(message) => handle_chat_message(&mut peers, &message)?,
             Event::NewPeer { name, sender } => {
-                match peers.entry(name) {
+                match peers.entry(name.clone()) {
                     Entry::Occupied(..) => (),
                     Entry::Vacant(entry) => {
                         entry.insert(sender);
@@ -199,6 +157,52 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
     }
 
     drop(peers);
+
+    Ok(())
+}
+
+fn handle_chat_message(
+    peers: &mut HashMap<String, Sender<Message>>,
+    message: &Message,
+) -> Result<()> {
+    match message {
+        Message::ChatMessage {
+            ref sender,
+            ref recipients,
+            message: ref _msg,
+            nonce: ref _nonce,
+        } => {
+            match recipients {
+                // Send to recipients directly
+                Some(recipients) => {
+                    for addr in recipients {
+                        match peers.get_mut(addr) {
+                            Some(peer) => peer.send(message.clone())?,
+                            None => {
+                                // Notify sender that one of the recipients wasn't found
+                                println!("{} not found", addr);
+                                if let Some(sender) = peers.get_mut(&sender.clone().unwrap()) {
+                                    sender.send(Message::ErrorMessage(format!(
+                                        "from server: no client '{}' found",
+                                        addr
+                                    )))?;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Broadcast
+                None => {
+                    for (name, peer) in peers.iter() {
+                        if *name != sender.clone().unwrap() {
+                            peer.send(message.clone())?;
+                        }
+                    }
+                }
+            }
+        }
+        _ => panic!("Unexpected message type!"),
+    };
 
     Ok(())
 }

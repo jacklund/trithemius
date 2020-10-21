@@ -8,6 +8,7 @@ async fn main() -> Result<()> {
     // Initialize crypto
     sodiumoxide::init().unwrap();
 
+    // TODO: Redo as code?
     let app = clap_app!(myapp =>
         (version: "0.1.0")
         (author: "Jack Lund <jackl@geekheads.net>")
