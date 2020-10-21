@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
             };
             ClientConnector::connect(socket_addr)
                 .await?
-                .handle_events(&key)
+                .handle_events(&name, &key)
                 .await?;
         }
         ("identity", Some(identity_matches)) => {

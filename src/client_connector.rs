@@ -19,7 +19,7 @@ impl ClientConnector {
         })
     }
 
-    pub async fn handle_events(self, key: &Key) -> Result<()> {
+    pub async fn handle_events(self, name: &str, key: &Key) -> Result<()> {
         // Set up terminal I/O
         let mut lines_from_stdin = BufReader::new(stdin()).lines().fuse();
 
@@ -30,7 +30,7 @@ impl ClientConnector {
         );
 
         // Send identity
-        framed.send(Message::Identity(key.get_name())).await?;
+        framed.send(Message::Identity(name.into())).await?;
 
         // Event loop
         loop {
