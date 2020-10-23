@@ -43,7 +43,10 @@ async fn main() -> Result<()> {
     let matches = app.clone().get_matches();
 
     let password = rpassword::read_password_from_tty(Some("password: "))?;
-    let mut keyfile = dirs::home_dir().unwrap();
+    let mut keyfile = match dirs::home_dir() {
+        Some(home_dir) => home_dir,
+        None => Err("Unable to find home directory")?,
+    };
     keyfile.push(".trithemius");
     let (mut keyring, mut keyring_file) = KeyRing::read_from_file(&keyfile, &password)?;
 

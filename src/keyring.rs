@@ -3,7 +3,7 @@ use sodiumoxide::crypto::{box_, hash, pwhash, secretbox};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // TODO: Unit tests
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -37,7 +37,7 @@ pub struct KeyRingFile {
     salt: Vec<u8>,
     nonce: Vec<u8>,
     encrypted: Vec<u8>,
-    path: Option<String>,
+    path: PathBuf,
 }
 
 impl Identity {
@@ -83,25 +83,38 @@ impl Key {
 }
 
 impl KeyRingFile {
-    fn get_salt(&self) -> pwhash::Salt {
-        pwhash::Salt::from_slice(&self.salt).unwrap()
+    fn new<P: AsRef<Path>>(path: &P) -> Self {
+        Self {
+            salt: pwhash::gen_salt().as_ref().to_vec(),
+            nonce: secretbox::gen_nonce().as_ref().to_vec(),
+            encrypted: vec![],
+            path: path.as_ref().to_path_buf(),
+        }
     }
 
-    fn get_nonce(&self) -> secretbox::Nonce {
-        secretbox::Nonce::from_slice(&self.nonce).unwrap()
+    fn get_salt(&self) -> Result<pwhash::Salt> {
+        match pwhash::Salt::from_slice(&self.salt) {
+            Some(salt) => Ok(salt),
+            None => Err("Error recovering salt from keyring file")?,
+        }
+    }
+
+    fn get_nonce(&self) -> Result<secretbox::Nonce> {
+        match secretbox::Nonce::from_slice(&self.nonce) {
+            Some(nonce) => Ok(nonce),
+            None => Err("Error recovering nonce from keyring file")?,
+        }
     }
 
     pub fn read<P: AsRef<Path>>(path: P, password: &str) -> Result<Self> {
-        let path_string = path.as_ref().to_str().unwrap().to_string();
-        match File::open(path_string.clone()) {
+        match File::open(path.as_ref()) {
             Ok(file) => {
                 let keyring_file: KeyRingFile = rmp_serde::from_read(file)?;
                 Ok(keyring_file)
             }
             Err(error) => match error.kind() {
                 ErrorKind::NotFound => {
-                    let mut keyring_file = KeyRingFile::default();
-                    keyring_file.path = Some(path_string);
+                    let mut keyring_file = KeyRingFile::new(&path);
                     let mut keyring = KeyRing::default();
                     keyring.save(&mut keyring_file, password)?;
                     Ok(keyring_file)
@@ -112,35 +125,24 @@ impl KeyRingFile {
     }
 
     pub fn save(&mut self, password: &str, keyring: &KeyRing) -> Result<()> {
-        self.encrypted = keyring.encrypt(password, &self.get_salt(), &self.get_nonce())?;
+        self.encrypted = keyring.encrypt(password, &self.get_salt()?, &self.get_nonce()?)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
-            .open(self.path.clone().unwrap())?;
+            .open(self.path.clone())?;
         rmp_serde::encode::write_named(&mut file, &self)?;
 
         Ok(())
     }
 }
 
-impl std::default::Default for KeyRingFile {
-    fn default() -> Self {
-        Self {
-            salt: pwhash::gen_salt().as_ref().to_vec(),
-            nonce: secretbox::gen_nonce().as_ref().to_vec(),
-            encrypted: vec![],
-            path: None,
-        }
-    }
-}
-
 impl KeyRing {
     pub fn read_from_file<P: AsRef<Path>>(path: &P, password: &str) -> Result<(Self, KeyRingFile)> {
         let keyring_file = KeyRingFile::read(path, password)?;
-        let file_encryption_key = derive_file_encryption_key(password, &keyring_file.get_salt())?;
+        let file_encryption_key = derive_file_encryption_key(password, &keyring_file.get_salt()?)?;
         match secretbox::open(
             &keyring_file.encrypted,
-            &keyring_file.get_nonce(),
+            &keyring_file.get_nonce()?,
             &file_encryption_key,
         ) {
             Ok(decrypted) => {

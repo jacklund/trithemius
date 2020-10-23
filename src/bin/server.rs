@@ -35,12 +35,10 @@ async fn main() -> Result<()> {
     )
     .get_matches();
 
-    let socket_addr = matches
-        .value_of("ADDR")
-        .unwrap()
-        .to_socket_addrs()?
-        .next()
-        .unwrap();
+    let socket_addr = match matches.value_of("ADDR").unwrap().to_socket_addrs()?.next() {
+        Some(socket_addr) => socket_addr,
+        None => Err("Unable to parse ADDR as socket address")?,
+    };
 
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -114,12 +112,13 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
 
     // Inform broker of new client
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    broker
-        .send(Event::NewPeer {
-            name: name.clone(),
-            sender,
-        })
-        .unwrap();
+    match broker.send(Event::NewPeer {
+        name: name.clone(),
+        sender,
+    }) {
+        Ok(_) => (),
+        Err(error) => Err(error)?,
+    };
 
     // Event loop
     loop {
@@ -145,9 +144,10 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
         }
     }
 
-    broker
-        .send(Event::PeerDisconnected { name: name.clone() })
-        .unwrap();
+    match broker.send(Event::PeerDisconnected { name: name.clone() }) {
+        Ok(_) => (),
+        Err(error) => Err(error)?,
+    };
     drop(broker);
     info!(log, "{} disconnected", name);
 

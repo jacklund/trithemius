@@ -57,11 +57,11 @@ impl ClientConnector {
                     message,
                     nonce,
                 } => {
-                    match secretbox::open(
-                        &message,
-                        &secretbox::Nonce::from_slice(&nonce).unwrap(),
-                        &key.get_key(),
-                    ) {
+                    let nonce_object = match secretbox::Nonce::from_slice(&nonce) {
+                        Some(nonce) => nonce,
+                        None => Err("Unable to create nonce from bytes in message")?,
+                    };
+                    match secretbox::open(&message, &nonce_object, &key.get_key()) {
                         Ok(plaintext) => {
                             println!(
                                 "from {}: {}",
