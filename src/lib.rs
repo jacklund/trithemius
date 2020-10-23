@@ -1,10 +1,15 @@
 #[macro_use]
 extern crate serde_derive;
 
+use futures::stream::TryStream;
+use futures::SinkExt;
 use sodiumoxide::crypto::{pwhash, secretbox};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
+use tokio_serde::formats::SymmetricalMessagePack;
 
 pub mod client_connector;
 pub mod keyring;
@@ -38,6 +43,38 @@ impl Message {
             recipients,
             message: encrypted,
             nonce: nonce.as_ref().to_vec(),
+        }
+    }
+}
+
+pub struct FramedConnection<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
+    framed: tokio_serde::Framed<
+        tokio_util::codec::Framed<T, tokio_util::codec::BytesCodec>,
+        Message,
+        Message,
+        tokio_serde::formats::MessagePack<Message, Message>,
+    >,
+}
+
+impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> FramedConnection<T> {
+    pub fn new(connection: T) -> Self {
+        Self {
+            framed: tokio_serde::SymmetricallyFramed::new(
+                tokio_util::codec::Framed::new(connection, tokio_util::codec::BytesCodec::new()),
+                SymmetricalMessagePack::<Message>::default(),
+            ),
+        }
+    }
+
+    pub async fn send(&mut self, message: Message) -> Result<()> {
+        Ok(self.framed.send(message).await?)
+    }
+
+    pub async fn next(&mut self) -> Option<Result<Message>> {
+        match self.framed.next().await {
+            None => None,
+            Some(Ok(message)) => Some(Ok(message)),
+            Some(Err(error)) => Err(error).ok()?,
         }
     }
 }

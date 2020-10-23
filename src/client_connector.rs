@@ -1,42 +1,35 @@
-use crate::{keyring::Key, Message, Result};
-use futures::{SinkExt, StreamExt};
+use crate::{keyring::Key, FramedConnection, Message, Result};
+use futures::StreamExt;
 use sodiumoxide::crypto::secretbox;
 use std::net::SocketAddr;
 use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::select;
-use tokio_serde::formats::SymmetricalMessagePack;
 
 pub struct ClientConnector {
-    stream: TcpStream,
+    sender: FramedConnection<TcpStream>,
 }
 
 impl ClientConnector {
     pub async fn connect(socket_addr: SocketAddr) -> Result<Self> {
         Ok(Self {
             // Connect to server
-            stream: TcpStream::connect(socket_addr).await?,
+            sender: FramedConnection::new(TcpStream::connect(socket_addr).await?),
         })
     }
 
-    pub async fn handle_events(self, name: &str, key: &Key) -> Result<()> {
+    pub async fn handle_events(mut self, name: &str, key: &Key) -> Result<()> {
         // Set up terminal I/O
         let mut lines_from_stdin = BufReader::new(stdin()).lines().fuse();
 
-        // Set up network I/O
-        let mut framed = tokio_serde::SymmetricallyFramed::new(
-            tokio_util::codec::Framed::new(self.stream, tokio_util::codec::BytesCodec::new()),
-            SymmetricalMessagePack::<Message>::default(),
-        );
-
         // Send identity
-        framed.send(Message::Identity(name.into())).await?;
+        self.sender.send(Message::Identity(name.into())).await?;
 
         // Event loop
         loop {
             select! {
                 // Read from network
-                message_opt = framed.next() => {
+                message_opt = self.sender.next() => {
                     match message_opt {
                         Some(result) => Self::handle_network_message(&key, result).await?,
                         None => break,
@@ -45,7 +38,7 @@ impl ClientConnector {
 
                 // Read from stdin
                 line = lines_from_stdin.next() => match line {
-                    Some(line) => framed.send(Self::parse_line(line?, &key)).await?,
+                    Some(line) => self.sender.send(Self::parse_line(line?, &key)).await?,
                     None => break,
                 }
 
@@ -55,7 +48,7 @@ impl ClientConnector {
         Ok(())
     }
 
-    async fn handle_network_message(key: &Key, result: tokio::io::Result<Message>) -> Result<()> {
+    async fn handle_network_message(key: &Key, result: Result<Message>) -> Result<()> {
         match result {
             Ok(message) => match message {
                 Message::ChatMessage {
