@@ -1,20 +1,18 @@
 use crate::{keyring::Key, FramedConnection, Message, Result};
 use futures::StreamExt;
 use sodiumoxide::crypto::secretbox;
-use std::net::SocketAddr;
-use tokio::io::{stdin, AsyncBufReadExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::io::{stdin, AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
 use tokio::select;
 
-pub struct ClientConnector {
-    sender: FramedConnection<TcpStream>,
+pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
+    sender: FramedConnection<T>,
 }
 
-impl ClientConnector {
-    pub async fn connect(socket_addr: SocketAddr) -> Result<Self> {
+impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
+    pub async fn connect(stream: T) -> Result<Self> {
         Ok(Self {
             // Connect to server
-            sender: FramedConnection::new(TcpStream::connect(socket_addr).await?),
+            sender: FramedConnection::new(stream),
         })
     }
 

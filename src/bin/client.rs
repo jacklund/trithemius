@@ -1,6 +1,7 @@
 use clap::clap_app;
 use sodiumoxide::crypto::secretbox;
 use std::net::ToSocketAddrs;
+use tokio::net::TcpStream;
 use trithemius::{client_connector::ClientConnector, keyring::KeyRing, Result};
 
 #[tokio::main]
@@ -64,7 +65,7 @@ async fn main() -> Result<()> {
                     name
                 ))?,
             };
-            ClientConnector::connect(socket_addr)
+            ClientConnector::connect(TcpStream::connect(socket_addr).await?)
                 .await?
                 .handle_events(&name, &key)
                 .await?;
