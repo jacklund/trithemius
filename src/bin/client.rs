@@ -56,6 +56,10 @@ async fn main() -> Result<()> {
             let address = connect_matches.value_of("ADDR").unwrap();
             let socket_addr = address.to_socket_addrs()?.next().unwrap();
             let name = connect_matches.value_of("NAME").unwrap();
+            let identity = match keyring.get_identity(&name) {
+                Some(identity) => identity,
+                None => Err(format!("Couldn't find identity '{}'", name))?,
+            };
             let key = match keyring.get_key(&address) {
                 Some(key) => key,
                 None => Err(format!(
@@ -65,9 +69,9 @@ async fn main() -> Result<()> {
                     name
                 ))?,
             };
-            ClientConnector::connect(TcpStream::connect(socket_addr).await?)
+            ClientConnector::connect(TcpStream::connect(socket_addr).await?, &identity)
                 .await?
-                .handle_events(&name, &key)
+                .handle_events(&key)
                 .await?;
         }
         ("identity", Some(identity_matches)) => {

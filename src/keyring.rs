@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 // TODO: Unit tests
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Identity {
-    name: String,
-    public_key: box_::PublicKey,
-    secret_key: box_::SecretKey,
+    pub name: String,
+    pub public_key: box_::PublicKey,
+    pub secret_key: box_::SecretKey,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

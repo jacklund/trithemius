@@ -243,7 +243,7 @@ mod tests {
     use tempfile::NamedTempFile;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{UnixListener, UnixStream};
-    use trithemius::FramedConnection;
+    use trithemius::{client_connector::ClientConnector, keyring::Identity};
 
     // Run the event loop to listen and handle new connections
     async fn event_loop(
@@ -284,10 +284,12 @@ mod tests {
     }
 
     // Connect a client to a Unix socket
-    async fn connect<P: AsRef<Path>>(path: &P) -> Result<FramedConnection<UnixStream>> {
+    async fn connect<P: AsRef<Path>>(path: &P, name: &str) -> Result<ClientConnector<UnixStream>> {
         loop {
             match UnixStream::connect(path).await {
-                Ok(stream) => return Ok(FramedConnection::new(stream)),
+                Ok(stream) => {
+                    return Ok(ClientConnector::connect(stream, &Identity::new(name)).await?)
+                }
                 Err(error) => std::thread::sleep(std::time::Duration::from_secs(1)),
             }
         }
@@ -297,11 +299,11 @@ mod tests {
     async fn connect_client<P: AsRef<Path>>(
         path: &P,
         name: &str,
-    ) -> Result<FramedConnection<UnixStream>> {
-        let mut framed = connect(&path).await?;
-        framed.send(Message::Identity(name.into())).await?;
+    ) -> Result<ClientConnector<UnixStream>> {
+        let mut connector: ClientConnector<UnixStream> = connect(&path, name).await?;
+        connector.send_identity().await?;
 
-        Ok(framed)
+        Ok(connector)
     }
 
     // Test setup
@@ -339,7 +341,7 @@ mod tests {
 
         // Send message from one
         framed2
-            .send(Message::new_chat_message(
+            .send_message(Message::new_chat_message(
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
@@ -347,7 +349,7 @@ mod tests {
             .await?;
 
         // Wait for message
-        let message = framed.next().await.unwrap()?;
+        let message = framed.next_message().await.unwrap()?;
         if let Message::ChatMessage {
             sender,
             recipients,
@@ -388,11 +390,11 @@ mod tests {
 
         // One client sends broadcast message
         framed2
-            .send(Message::new_chat_message(&session_key, None, "Hello"))
+            .send_message(Message::new_chat_message(&session_key, None, "Hello"))
             .await?;
 
         // Check for message on other two clients
-        let message = framed.next().await.unwrap()?;
+        let message = framed.next_message().await.unwrap()?;
         if let Message::ChatMessage {
             sender,
             recipients,
@@ -411,7 +413,7 @@ mod tests {
             panic!("Got wrong type of message!");
         }
 
-        let message = framed3.next().await.unwrap()?;
+        let message = framed3.next_message().await.unwrap()?;
         if let Message::ChatMessage {
             sender,
             recipients,
