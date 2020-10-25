@@ -69,23 +69,17 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 recipients: _,
                 message,
                 nonce,
-            } => {
-                let nonce_object = match secretbox::Nonce::from_slice(&nonce) {
-                    Some(nonce) => nonce,
-                    None => Err("Unable to create nonce from bytes in message")?,
-                };
-                match secretbox::open(&message, &nonce_object, &key.get_key()) {
-                    Ok(plaintext) => {
-                        println!(
-                            "from {}: {}",
-                            sender.unwrap_or("unknown sender".into()),
-                            std::str::from_utf8(&plaintext)?
-                        );
-                        Ok(())
-                    }
-                    Err(_) => Err(format!("Error decrypting message"))?,
+            } => match secretbox::open(&message, &nonce, &key.get_key()) {
+                Ok(plaintext) => {
+                    println!(
+                        "from {}: {}",
+                        sender.unwrap_or("unknown sender".into()),
+                        std::str::from_utf8(&plaintext)?
+                    );
+                    Ok(())
                 }
-            }
+                Err(_) => Err(format!("Error decrypting message"))?,
+            },
             Message::ErrorMessage(error) => {
                 println!("error: {}", error);
                 Ok(())

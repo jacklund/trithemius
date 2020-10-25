@@ -22,7 +22,7 @@ pub enum Message {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
         message: Vec<u8>,
-        nonce: Vec<u8>,
+        nonce: secretbox::Nonce,
     },
     ErrorMessage(String),
 }
@@ -39,7 +39,7 @@ impl Message {
             sender: None,
             recipients,
             message: encrypted,
-            nonce: nonce.as_ref().to_vec(),
+            nonce,
         }
     }
 }

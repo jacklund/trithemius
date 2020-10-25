@@ -357,12 +357,7 @@ mod tests {
             nonce,
         } = message
         {
-            let msg = secretbox::open(
-                &message,
-                &secretbox::Nonce::from_slice(&nonce).unwrap(),
-                &session_key,
-            )
-            .unwrap();
+            let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
             assert_eq!("Hello", std::str::from_utf8(&msg)?);
         } else {
             panic!("Got wrong type of message!");
@@ -402,12 +397,7 @@ mod tests {
             nonce,
         } = message
         {
-            let msg = secretbox::open(
-                &message,
-                &secretbox::Nonce::from_slice(&nonce).unwrap(),
-                &session_key,
-            )
-            .unwrap();
+            let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
             assert_eq!("Hello", std::str::from_utf8(&msg)?);
         } else {
             panic!("Got wrong type of message!");
@@ -421,12 +411,7 @@ mod tests {
             nonce,
         } = message
         {
-            let msg = secretbox::open(
-                &message,
-                &secretbox::Nonce::from_slice(&nonce).unwrap(),
-                &session_key,
-            )
-            .unwrap();
+            let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
             assert_eq!("Hello", std::str::from_utf8(&msg)?);
         } else {
             panic!("Got wrong type of message!");
