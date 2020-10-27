@@ -25,6 +25,24 @@ enum Event {
     Message(Message),
 }
 
+// Need this so that I can substitute a UnixListener or TcpListener
+macro_rules! server_event_loop {
+    ($listener:expr, $addr:expr, $log:expr) => {
+        // Set up broker
+        let broker_sender = run_broker_loop();
+
+        loop {
+            let (stream, _socket_addr) = $listener.accept().await?;
+            info!($log, "Accepting from: {:?}", stream.peer_addr()?);
+            spawn_and_log_error(handle_connection(
+                $log.new(o!()),
+                broker_sender.clone(),
+                stream,
+            ));
+        }
+    };
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let matches = clap_app!(myapp =>
@@ -46,20 +64,8 @@ async fn main() -> Result<()> {
 
     let log = slog::Logger::root(drain, o!());
 
-    // Set up broker
-    let broker_sender = run_broker_loop();
-
-    // Listen and handle incoming connections
     let listener = TcpListener::bind(socket_addr).await?;
-    loop {
-        let (stream, _) = listener.accept().await?;
-        info!(log, "Accepting from: {}", stream.peer_addr()?);
-        spawn_and_log_error(handle_connection(
-            log.new(o!()),
-            broker_sender.clone(),
-            stream,
-        ));
-    }
+    server_event_loop!(listener, socket_addr, log);
 }
 
 fn run_broker_loop() -> Sender<Event> {
@@ -245,44 +251,6 @@ mod tests {
     use tokio::net::{UnixListener, UnixStream};
     use trithemius::{client_connector::ClientConnector, keyring::Identity};
 
-    // Run the event loop to listen and handle new connections
-    async fn event_loop(
-        log: Logger,
-        path: String,
-        mut control_receiver: Receiver<()>,
-        broker_sender: Sender<Event>,
-    ) -> Result<()> {
-        // Listen and handle incoming connections
-        let listener = UnixListener::bind(path.clone())?;
-        loop {
-            select! {
-                result = listener.accept() => {
-                    let (stream, _) = result?;
-                    spawn_and_log_error(handle_connection(log.new(o!()), broker_sender.clone(), stream));
-                },
-
-                _ = control_receiver.recv() => break,
-            }
-        }
-
-        Ok(())
-    }
-
-    // Set up the event loop and return the channel to terminate it
-    async fn run_event_loop<P: AsRef<Path>>(log: Logger, path: &P) -> Result<Sender<()>> {
-        let broker_sender = run_broker_loop();
-        let (control_sender, control_receiver) = mpsc::unbounded_channel();
-
-        let path_string = path.as_ref().to_str().unwrap().to_string();
-        spawn_and_log_error(event_loop(
-            log,
-            path_string,
-            control_receiver,
-            broker_sender,
-        ));
-        Ok(control_sender)
-    }
-
     // Connect a client to a Unix socket
     async fn connect<P: AsRef<Path>>(path: &P, name: &str) -> Result<ClientConnector<UnixStream>> {
         loop {
@@ -330,7 +298,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_sending_recipient_message() -> Result<()> {
         let (log, path, session_key) = setup()?;
-        let control_sender = run_event_loop(log.new(o!()), &path).await?;
+        let listener = UnixListener::bind(path.clone())?;
+        spawn_and_log_error(async move {
+            server_event_loop!(listener, path, log);
+        });
 
         // Connect two clients to server
         let mut framed = connect_client(&path, "foo").await?;
@@ -364,7 +335,7 @@ mod tests {
         }
 
         // Shut down
-        control_sender.send(());
+        // control_sender.send(());
         teardown(&path);
 
         Ok(())
@@ -373,7 +344,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_sending_broadcast_message() -> Result<()> {
         let (log, path, session_key) = setup()?;
-        let control_sender = run_event_loop(log.new(o!()), &path).await?;
+        let listener = UnixListener::bind(path.clone())?;
+        spawn_and_log_error(async move {
+            server_event_loop!(listener, path, log);
+        });
 
         // Connect three clients
         let mut framed = connect_client(&path, "foo").await?;
@@ -420,7 +394,6 @@ mod tests {
         // Should really check to make sure the sending client doesn't get it,
         // but since Unix socket peek isn't a thing in Rust, ¯\_(ツ)_/¯
 
-        control_sender.send(());
         teardown(&path);
         Ok(())
     }
