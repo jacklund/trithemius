@@ -3,6 +3,7 @@ use futures::StreamExt;
 use sodiumoxide::crypto::secretbox;
 use tokio::io::{stdin, AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
 use tokio::select;
+use tokio_util::codec::{BytesCodec, Framed};
 
 pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     sender: FramedConnection<T>,
@@ -16,6 +17,10 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             sender: FramedConnection::new(stream),
             identity: identity.clone(),
         })
+    }
+
+    pub fn get_mut(&mut self) -> &mut Framed<T, BytesCodec> {
+        self.sender.get_mut()
     }
 
     pub async fn send_identity(&mut self) -> Result<()> {

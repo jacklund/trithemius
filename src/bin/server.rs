@@ -1,7 +1,7 @@
 use clap::clap_app;
 use futures::stream::StreamExt;
 use futures::{SinkExt, Stream};
-use slog::{info, o, Drain, Logger};
+use slog::{error, info, o, Drain, Logger};
 use std::collections::{hash_map::Entry, HashMap};
 use std::future::Future;
 use std::net::ToSocketAddrs;
@@ -93,8 +93,8 @@ where
     match framed.next().await {
         Some(Ok(Message::Identity(name))) => Ok(name),
         Some(Ok(something)) => {
-            info!(log, "{:?}", something);
-            panic!("Unexpected message type");
+            error!(log, "Got unexpected message {:?}, disconnecting", something);
+            Err("Unexpected message type")?
         }
         Some(Err(error)) => Err(error)?,
         None => Ok("".into()),
@@ -293,6 +293,79 @@ mod tests {
     // Test teardown
     fn teardown(path: &str) {
         std::fs::remove_file(path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sending_unexpected_message() -> Result<()> {
+        let (log, path, session_key) = setup()?;
+        let listener = UnixListener::bind(path.clone())?;
+        let new_log = log.new(o!());
+        spawn_and_log_error(async move {
+            server_event_loop!(listener, path, new_log);
+        });
+
+        let name = "foo";
+        let mut connector: ClientConnector<UnixStream> = connect(&path, name).await?;
+        connector
+            .send_message(Message::new_chat_message(
+                &session_key,
+                Some(vec!["foo".into()]),
+                "Hello",
+            ))
+            .await?;
+
+        // Wait for server
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Server should disconnect, so next message attempt should fail
+        assert!(connector
+            .send_message(Message::new_chat_message(
+                &session_key,
+                Some(vec!["foo".into()]),
+                "Hello",
+            ))
+            .await
+            .is_err());
+
+        // Shut down
+        teardown(&path);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sending_garbage_message() -> Result<()> {
+        let (log, path, session_key) = setup()?;
+        let listener = UnixListener::bind(path.clone())?;
+        let new_log = log.new(o!());
+        spawn_and_log_error(async move {
+            server_event_loop!(listener, path, new_log);
+        });
+
+        let name = "foo";
+        let mut connector: ClientConnector<UnixStream> = connect(&path, name).await?;
+        connector
+            .get_mut()
+            .send("You won't like that".as_bytes().into())
+            .await?;
+
+        // Wait for server
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Server should disconnect, so next message attempt should fail
+        assert!(connector
+            .send_message(Message::new_chat_message(
+                &session_key,
+                Some(vec!["foo".into()]),
+                "Hello",
+            ))
+            .await
+            .is_err());
+
+        // Shut down
+        teardown(&path);
+
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]

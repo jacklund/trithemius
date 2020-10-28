@@ -7,6 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
 use tokio_serde::formats::SymmetricalMessagePack;
+use tokio_util::codec::{BytesCodec, Framed};
 
 pub mod client_connector;
 pub mod keyring;
@@ -61,6 +62,10 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> FramedConnection<T> {
                 SymmetricalMessagePack::<Message>::default(),
             ),
         }
+    }
+
+    pub fn get_mut(&mut self) -> &mut Framed<T, BytesCodec> {
+        self.framed.get_mut()
     }
 
     pub async fn send(&mut self, message: Message) -> Result<()> {
