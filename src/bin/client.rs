@@ -1,4 +1,4 @@
-use clap::clap_app;
+use clap::{App, AppSettings, Arg, SubCommand};
 use sodiumoxide::crypto::secretbox;
 use std::net::ToSocketAddrs;
 use tokio::net::TcpStream;
@@ -9,38 +9,63 @@ async fn main() -> Result<()> {
     // Initialize crypto
     sodiumoxide::init().unwrap();
 
-    // TODO: Redo as code?
-    let app = clap_app!(myapp =>
-        (version: "0.1.0")
-        (author: "Jack Lund <jackl@geekheads.net>")
-        (about: "Encrypted chat client")
-        (@setting SubcommandRequired)
-
-        (@subcommand connect =>
-         (about: "Connect to server")
-         (@arg ADDR: +required "Address to connect to")
-         (@arg NAME: +required "Name of identity"))
-
-        (@subcommand identity =>
-         (@setting SubcommandRequired)
-         (@subcommand add =>
-          (about: "Add identity")
-          (@arg NAME: +required "Name of identity"))
-         (@subcommand remove =>
-          (about: "Remove identity")
-          (@arg NAME: +required "Name of identity"))
-         (@subcommand list =>
-          (about: "List identities")))
-
-        (@subcommand key =>
-         (@setting SubcommandRequired)
-         (@subcommand add =>
-          (@arg NAME: +required "Server name"))
-         (@subcommand remove =>
-          (@arg NAME: +required "Server name"))
-         (@subcommand list =>
-          (about: "List server keys")))
-    );
+    let app = App::new("Trithemius")
+        .version("0.1.0")
+        .author("Jack Lund <jackl@geekheads.net>")
+        .about("Encrypted chat client")
+        .setting(AppSettings::SubcommandRequired)
+        // Connect subcommand
+        .subcommand(
+            SubCommand::with_name("connect")
+                .setting(AppSettings::SubcommandRequired)
+                .about("Connect to server")
+                .arg(
+                    Arg::with_name("ADDR")
+                        .required(true)
+                        .help("Address to connect to"),
+                )
+                .arg(
+                    Arg::with_name("NAME")
+                        .required(true)
+                        .help("Name of identity"),
+                ),
+        )
+        // Identity subcommand
+        .subcommand(
+            SubCommand::with_name("identity")
+                .setting(AppSettings::SubcommandRequired)
+                .subcommand(
+                    SubCommand::with_name("add").about("Add identity").arg(
+                        Arg::with_name("NAME")
+                            .required(true)
+                            .help("Name of identity"),
+                    ),
+                )
+                .subcommand(
+                    SubCommand::with_name("remove")
+                        .about("Remove identity")
+                        .arg(
+                            Arg::with_name("NAME")
+                                .required(true)
+                                .help("Name of identity"),
+                        ),
+                )
+                .subcommand(SubCommand::with_name("list").about("List identities")),
+        )
+        // Key subcommand
+        .subcommand(
+            SubCommand::with_name("key")
+                .setting(AppSettings::SubcommandRequired)
+                .subcommand(
+                    SubCommand::with_name("add")
+                        .arg(Arg::with_name("NAME").required(true).help("Server name")),
+                )
+                .subcommand(
+                    SubCommand::with_name("remove")
+                        .arg(Arg::with_name("NAME").required(true).help("Server name")),
+                )
+                .subcommand(SubCommand::with_name("list").about("List server keys")),
+        );
     let matches = app.clone().get_matches();
 
     let password = rpassword::read_password_from_tty(Some("password: "))?;
