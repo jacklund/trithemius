@@ -55,8 +55,7 @@ impl Identity {
     }
 
     pub fn get_fingerprint(&self) -> String {
-        let digest = hash::hash(self.public_key.as_ref());
-        fingerprint(&digest.as_ref()[..16])
+        fingerprint(self.public_key.as_ref())
     }
 }
 
@@ -77,8 +76,7 @@ impl Key {
     }
 
     pub fn get_fingerprint(&self) -> String {
-        let digest = hash::hash(self.key.as_ref());
-        fingerprint(&digest.as_ref()[..16])
+        fingerprint(self.key.as_ref())
     }
 }
 

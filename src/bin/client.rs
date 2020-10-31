@@ -25,9 +25,14 @@ async fn main() -> Result<()> {
                         .help("Address to connect to"),
                 )
                 .arg(
-                    Arg::with_name("NAME")
+                    Arg::with_name("IDENTITY")
                         .required(true)
                         .help("Name of identity"),
+                )
+                .arg(
+                    Arg::with_name("NAME")
+                        .required(false)
+                        .help("Name to use when connecting (default is same as identity name)"),
                 ),
         )
         // Identity subcommand
@@ -80,8 +85,12 @@ async fn main() -> Result<()> {
         ("connect", Some(connect_matches)) => {
             let address = connect_matches.value_of("ADDR").unwrap();
             let socket_addr = address.to_socket_addrs()?.next().unwrap();
-            let name = connect_matches.value_of("NAME").unwrap();
-            let identity = match keyring.get_identity(&name) {
+            let identity_name = connect_matches.value_of("IDENTITY").unwrap();
+            let name = match connect_matches.value_of("NAME") {
+                Some(name) => name,
+                None => identity_name,
+            };
+            let identity = match keyring.get_identity(&identity_name) {
                 Some(identity) => identity,
                 None => Err(format!("Couldn't find identity '{}'", name))?,
             };
@@ -94,7 +103,7 @@ async fn main() -> Result<()> {
                     name
                 ))?,
             };
-            ClientConnector::connect(TcpStream::connect(socket_addr).await?, &identity)
+            ClientConnector::connect(TcpStream::connect(socket_addr).await?, &identity, &name)
                 .await?
                 .handle_events(&key)
                 .await?;

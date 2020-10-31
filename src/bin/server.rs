@@ -13,16 +13,24 @@ use tokio::task;
 use tokio_serde::formats::SymmetricalMessagePack;
 use trithemius::{Message, Receiver, Result, Sender};
 
+type PeerMap = HashMap<String, Sender<Message>>;
+
 #[derive(Debug)]
 enum Event {
     NewPeer {
-        name: String,
+        client_id: ClientIdentity,
         sender: Sender<Message>,
     },
     PeerDisconnected {
         name: String,
     },
     Message(Message),
+}
+
+#[derive(Clone, Debug)]
+struct ClientIdentity {
+    name: String,
+    fingerprint: String,
 }
 
 // Need this so that I can substitute a UnixListener or TcpListener
@@ -86,18 +94,20 @@ where
     })
 }
 
-async fn read_client_identity<R>(log: &Logger, framed: &mut R) -> Result<String>
+async fn read_client_identity<R>(log: &Logger, framed: &mut R) -> Result<ClientIdentity>
 where
     R: Stream<Item = std::result::Result<Message, std::io::Error>> + std::marker::Unpin,
 {
     match framed.next().await {
-        Some(Ok(Message::Identity(name))) => Ok(name),
+        Some(Ok(Message::Identity { name, fingerprint })) => {
+            Ok(ClientIdentity { name, fingerprint })
+        }
         Some(Ok(something)) => {
             error!(log, "Got unexpected message {:?}, disconnecting", something);
             Err("Unexpected message type")?
         }
         Some(Err(error)) => Err(error)?,
-        None => Ok("".into()),
+        None => Err("Client disconnected")?,
     }
 }
 
@@ -113,13 +123,13 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
     );
 
     // Read client name
-    let name = read_client_identity(&log, &mut framed).await?;
-    info!(log, "{} connected", name);
+    let client_id = read_client_identity(&log, &mut framed).await?;
+    info!(log, "{} connected", client_id.name);
 
     // Inform broker of new client
     let (sender, mut receiver) = mpsc::unbounded_channel();
     match broker.send(Event::NewPeer {
-        name: name.clone(),
+        client_id: client_id.clone(),
         sender,
     }) {
         Ok(_) => (),
@@ -133,8 +143,10 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
             message_opt = framed.next() => {
                 match message_opt {
                     Some(Ok(message)) => match message {
+                        // TODO: Handle name-change message (see below)
                         Message::ErrorMessage(_) => broker.send(Event::Message(message))?,
-                        Message::ChatMessage{ sender: _, recipients, message, nonce } => broker.send(Event::Message(Message::ChatMessage{ sender: Some(name.clone()), recipients, message, nonce }))?,
+                        Message::ChatMessage{ sender: _, recipients, message, nonce } =>
+                            broker.send(Event::Message(Message::ChatMessage{ sender: Some(client_id.name.clone()), recipients, message, nonce }))?,
                         something => panic!("Unexpected message {:?}", something),
                     },
                     Some(Err(error)) => Err(error)?,
@@ -144,35 +156,59 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
 
             // Handle message from broker
             message_opt = receiver.recv() => match message_opt {
+                // Send IdentityTaken and disconnect
+                Some(message @ Message::IdentityTaken { .. }) => {
+                    framed.send(message).await?;
+                    break;
+                }
                 Some(message) => framed.send(message).await?,
                 None => break,
             },
         }
     }
 
-    match broker.send(Event::PeerDisconnected { name: name.clone() }) {
+    match broker.send(Event::PeerDisconnected {
+        name: client_id.name.clone(),
+    }) {
         Ok(_) => (),
         Err(error) => Err(error)?,
     };
     drop(broker);
-    info!(log, "{} disconnected", name);
+    info!(log, "{} disconnected", client_id.name);
 
     Ok(())
 }
 
+fn add_peer(
+    peers: &mut PeerMap,
+    client_id: ClientIdentity,
+    sender: Sender<Message>,
+) -> Result<bool> {
+    match peers.entry(client_id.name.clone()) {
+        Entry::Occupied(..) => {
+            sender.send(Message::IdentityTaken {
+                name: client_id.name.clone(),
+            })?;
+            Ok(false)
+        }
+        Entry::Vacant(entry) => {
+            // TODO: Send new peer message to all connected clients
+            entry.insert(sender);
+            Ok(true)
+        }
+    }
+}
+
 async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
-    let mut peers: HashMap<String, Sender<Message>> = HashMap::new();
+    let mut peers = PeerMap::new();
 
     while let Some(event) = events.next().await {
         match event {
             Event::Message(message) => handle_chat_message(&mut peers, &message)?,
-            Event::NewPeer { name, sender } => {
-                match peers.entry(name.clone()) {
-                    Entry::Occupied(..) => (),
-                    Entry::Vacant(entry) => {
-                        entry.insert(sender);
-                    }
-                };
+            Event::NewPeer { client_id, sender } => {
+                if !add_peer(&mut peers, client_id, sender)? {
+                    break;
+                }
             }
             Event::PeerDisconnected { name } => {
                 peers.remove(&name);
@@ -191,10 +227,7 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
     Ok(())
 }
 
-fn handle_chat_message(
-    peers: &mut HashMap<String, Sender<Message>>,
-    message: &Message,
-) -> Result<()> {
+fn handle_chat_message(peers: &mut PeerMap, message: &Message) -> Result<()> {
     match message {
         Message::ChatMessage {
             ref sender,
@@ -256,7 +289,7 @@ mod tests {
         loop {
             match UnixStream::connect(path).await {
                 Ok(stream) => {
-                    return Ok(ClientConnector::connect(stream, &Identity::new(name)).await?)
+                    return Ok(ClientConnector::connect(stream, &Identity::new(name), &name).await?)
                 }
                 Err(error) => std::thread::sleep(std::time::Duration::from_secs(1)),
             }
@@ -468,6 +501,44 @@ mod tests {
         // but since Unix socket peek isn't a thing in Rust, ¯\_(ツ)_/¯
 
         teardown(&path);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sending_duplicate_identities() -> Result<()> {
+        let (log, path, session_key) = setup()?;
+        let listener = UnixListener::bind(path.clone())?;
+        let spawn_log = log.new(o!());
+        spawn_and_log_error(async move {
+            server_event_loop!(listener, path, spawn_log);
+        });
+
+        // Connect two clients to server
+        let mut framed = connect_client(&path, "foo").await?;
+        let mut framed2 = connect_client(&path, "foo").await?;
+
+        // Wait for server
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        // Wait for message
+        let message = framed2.next_message().await.unwrap()?;
+
+        assert_eq!(Message::IdentityTaken { name: "foo".into() }, message);
+
+        // Server should disconnect, so next message attempt should fail
+        assert!(framed2
+            .send_message(Message::new_chat_message(
+                &session_key,
+                Some(vec!["foo".into()]),
+                "Hello",
+            ))
+            .await
+            .is_err());
+
+        // Shut down
+        // control_sender.send(());
+        teardown(&path);
+
         Ok(())
     }
 }

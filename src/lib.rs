@@ -2,7 +2,7 @@
 extern crate serde_derive;
 
 use futures::SinkExt;
-use sodiumoxide::crypto::{pwhash, secretbox};
+use sodiumoxide::crypto::{box_, hash, pwhash, secretbox};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
@@ -16,9 +16,15 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 pub type Sender<T> = mpsc::UnboundedSender<T>;
 pub type Receiver<T> = mpsc::UnboundedReceiver<T>;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum Message {
-    Identity(String),
+    Identity {
+        name: String,
+        fingerprint: String,
+    },
+    IdentityTaken {
+        name: String,
+    },
     ChatMessage {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
@@ -29,6 +35,13 @@ pub enum Message {
 }
 
 impl Message {
+    pub fn identity(name: &str, public_key: &box_::PublicKey) -> Self {
+        Message::Identity {
+            name: name.into(),
+            fingerprint: fingerprint(public_key.as_ref()),
+        }
+    }
+
     pub fn new_chat_message(
         key: &secretbox::Key,
         recipients: Option<Vec<String>>,
@@ -104,8 +117,9 @@ fn derive_file_encryption_key(password: &str, salt: &pwhash::Salt) -> Result<sec
     )
 }
 
-pub fn fingerprint(data: &[u8]) -> String {
-    let mut hexed = hex::encode(data);
+pub fn fingerprint(key: &[u8]) -> String {
+    let digest = hash::hash(key);
+    let mut hexed = hex::encode(&digest.as_ref()[..16]);
     let mut v = vec![];
     loop {
         let pair: String = hexed.drain(..2).collect();

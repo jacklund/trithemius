@@ -8,14 +8,16 @@ use tokio_util::codec::{BytesCodec, Framed};
 pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     sender: FramedConnection<T>,
     identity: keyring::Identity,
+    name: String,
 }
 
 impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
-    pub async fn connect(stream: T, identity: &keyring::Identity) -> Result<Self> {
+    pub async fn connect(stream: T, identity: &keyring::Identity, name: &str) -> Result<Self> {
         Ok(Self {
             // Connect to server
             sender: FramedConnection::new(stream),
             identity: identity.clone(),
+            name: name.into(),
         })
     }
 
@@ -26,7 +28,10 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
     pub async fn send_identity(&mut self) -> Result<()> {
         Ok(self
             .sender
-            .send(Message::Identity(self.identity.name.clone()))
+            .send(Message::identity(
+                &self.name.clone(),
+                &self.identity.public_key,
+            ))
             .await?)
     }
 
@@ -85,6 +90,10 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 }
                 Err(_) => Err(format!("Error decrypting message"))?,
             },
+            Message::IdentityTaken { name } => {
+                println!("Name {} is taken, please use a different one: ", name);
+                Ok(())
+            }
             Message::ErrorMessage(error) => {
                 println!("error: {}", error);
                 Ok(())
