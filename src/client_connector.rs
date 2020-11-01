@@ -91,7 +91,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 Err(_) => Err(format!("Error decrypting message"))?,
             },
             Message::IdentityTaken { name } => {
-                println!("Name {} is taken, please use a different one: ", name);
+                println!("Name {} is taken, please use a different one", name);
                 Ok(())
             }
             Message::ErrorMessage(error) => {

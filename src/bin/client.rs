@@ -17,7 +17,6 @@ async fn main() -> Result<()> {
         // Connect subcommand
         .subcommand(
             SubCommand::with_name("connect")
-                .setting(AppSettings::SubcommandRequired)
                 .about("Connect to server")
                 .arg(
                     Arg::with_name("ADDR")
@@ -38,7 +37,6 @@ async fn main() -> Result<()> {
         // Identity subcommand
         .subcommand(
             SubCommand::with_name("identity")
-                .setting(AppSettings::SubcommandRequired)
                 .subcommand(
                     SubCommand::with_name("add").about("Add identity").arg(
                         Arg::with_name("NAME")
@@ -60,7 +58,6 @@ async fn main() -> Result<()> {
         // Key subcommand
         .subcommand(
             SubCommand::with_name("key")
-                .setting(AppSettings::SubcommandRequired)
                 .subcommand(
                     SubCommand::with_name("add")
                         .arg(Arg::with_name("NAME").required(true).help("Server name")),
