@@ -1,7 +1,7 @@
 use clap::clap_app;
 use futures::stream::StreamExt;
 use futures::{SinkExt, Stream};
-use slog::{error, info, o, Drain, Logger};
+use slog::{debug, error, info, o, Drain, Level, Logger};
 use std::collections::{hash_map::Entry, HashMap};
 use std::future::Future;
 use std::net::ToSocketAddrs;
@@ -37,7 +37,7 @@ struct ClientIdentity {
 macro_rules! server_event_loop {
     ($listener:expr, $addr:expr, $log:expr) => {
         // Set up broker
-        let broker_sender = run_broker_loop();
+        let broker_sender = run_broker_loop($log.new(o!()));
 
         loop {
             let (stream, _socket_addr) = $listener.accept().await?;
@@ -57,6 +57,7 @@ async fn main() -> Result<()> {
         (version: "0.1.0")
         (author: "Jack Lund <jackl@geekheads.net>")
         (about: "Encrypted chat")
+        (@arg debug: -d --debug "Turns debug logging on")
         (@arg ADDR: +required "Address to listen on")
     )
     .get_matches();
@@ -69,16 +70,20 @@ async fn main() -> Result<()> {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
+    let log = if matches.is_present("debug") {
+        slog::Logger::root(drain.filter_level(Level::Debug).fuse(), o!())
+    } else {
+        slog::Logger::root(drain, o!(()))
+    };
 
-    let log = slog::Logger::root(drain, o!());
-
+    debug!(log, "Binding to {}", socket_addr);
     let listener = TcpListener::bind(socket_addr).await?;
     server_event_loop!(listener, socket_addr, log);
 }
 
-fn run_broker_loop() -> Sender<Event> {
+fn run_broker_loop(log: Logger) -> Sender<Event> {
     let (broker_sender, broker_receiver) = mpsc::unbounded_channel();
-    spawn_and_log_error(broker_loop(broker_receiver));
+    spawn_and_log_error(broker_loop(log, broker_receiver));
 
     broker_sender
 }
@@ -128,6 +133,10 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
 
     // Inform broker of new client
     let (sender, mut receiver) = mpsc::unbounded_channel();
+    debug!(
+        log,
+        "{:?}: Sending NewPeer to broker for {:?}", client_id, client_id
+    );
     match broker.send(Event::NewPeer {
         client_id: client_id.clone(),
         sender,
@@ -141,6 +150,7 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
         select! {
             // Handle message coming from client
             message_opt = framed.next() => {
+                debug!(log, "{:?}: Got {:?} from client {:?}", client_id, message_opt, client_id);
                 match message_opt {
                     Some(Ok(message)) => match message {
                         // TODO: Handle name-change message (see below)
@@ -155,15 +165,20 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
             },
 
             // Handle message from broker
-            message_opt = receiver.recv() => match message_opt {
-                // Send IdentityTaken and disconnect
-                Some(message @ Message::IdentityTaken { .. }) => {
-                    framed.send(message).await?;
-                    break;
-                }
-                Some(message) => framed.send(message).await?,
-                None => break,
-            },
+            message_opt = receiver.recv() => {
+                debug!(log, "{:?}: Got {:?} from broker", client_id, message_opt);
+                match message_opt {
+                    // Send IdentityTaken and disconnect
+                    Some(message @ Message::IdentityTaken { .. }) => {
+                        framed.send(message).await?;
+                        // Client disconnected in another thread
+                        connected = false;
+                        break;
+                    }
+                    Some(message) => framed.send(message).await?,
+                    None => break,
+                };
+            }
         }
     }
 
@@ -180,35 +195,41 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
 }
 
 fn add_peer(
+    log: &Logger,
     peers: &mut PeerMap,
     client_id: ClientIdentity,
     sender: Sender<Message>,
-) -> Result<bool> {
+) -> Result<()> {
+    debug!(log, "Adding peer {:?}", client_id);
     match peers.entry(client_id.name.clone()) {
         Entry::Occupied(..) => {
+            debug!(
+                log,
+                "Already have peer {:?}, sending IdentityTaken and disconnecting", client_id
+            );
             sender.send(Message::IdentityTaken {
                 name: client_id.name.clone(),
             })?;
-            Ok(false)
         }
         Entry::Vacant(entry) => {
             // TODO: Send new peer message to all connected clients
+            debug!(log, "Adding peer {:?} to peers list", client_id);
             entry.insert(sender);
-            Ok(true)
         }
-    }
+    };
+    Ok(())
 }
 
-async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
+async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
     let mut peers = PeerMap::new();
 
+    debug!(log, "Starting broker event loop");
     while let Some(event) = events.next().await {
+        debug!(log, "Got broker event {:?}", event);
         match event {
-            Event::Message(message) => handle_chat_message(&mut peers, &message)?,
+            Event::Message(message) => handle_chat_message(&log, &mut peers, &message)?,
             Event::NewPeer { client_id, sender } => {
-                if !add_peer(&mut peers, client_id, sender)? {
-                    break;
-                }
+                add_peer(&log, &mut peers, client_id, sender)?;
             }
             Event::PeerDisconnected { name } => {
                 peers.remove(&name);
@@ -221,13 +242,15 @@ async fn broker_loop(mut events: Receiver<Event>) -> Result<()> {
             }
         }
     }
+    debug!(log, "Left broker event loop");
 
     drop(peers);
 
     Ok(())
 }
 
-fn handle_chat_message(peers: &mut PeerMap, message: &Message) -> Result<()> {
+fn handle_chat_message(log: &Logger, peers: &mut PeerMap, message: &Message) -> Result<()> {
+    debug!(log, "Got message {:?}", message);
     match message {
         Message::ChatMessage {
             ref sender,
@@ -238,6 +261,7 @@ fn handle_chat_message(peers: &mut PeerMap, message: &Message) -> Result<()> {
             match recipients {
                 // Send to recipients directly
                 Some(recipients) => {
+                    debug!(log, "Recipient list: {:?}", recipients);
                     for addr in recipients {
                         match peers.get_mut(addr) {
                             Some(peer) => peer.send(message.clone())?,
@@ -255,6 +279,7 @@ fn handle_chat_message(peers: &mut PeerMap, message: &Message) -> Result<()> {
                 }
                 // Broadcast
                 None => {
+                    debug!(log, "Got broadcast message");
                     for (name, peer) in peers.iter() {
                         if *name != sender.clone().unwrap() {
                             peer.send(message.clone())?;
