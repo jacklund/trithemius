@@ -25,6 +25,13 @@ pub enum Message {
     IdentityTaken {
         name: String,
     },
+    NewPeer {
+        name: String,
+        fingerprint: String,
+    },
+    PeerDisconnected {
+        name: String,
+    },
     ChatMessage {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
@@ -40,6 +47,17 @@ impl Message {
             name: name.into(),
             fingerprint: fingerprint(public_key.as_ref()),
         }
+    }
+
+    pub fn new_peer(name: &str, fingerprint: &str) -> Self {
+        Message::NewPeer {
+            name: name.into(),
+            fingerprint: fingerprint.into(),
+        }
+    }
+
+    pub fn peer_disconnected(name: &str) -> Self {
+        Message::PeerDisconnected { name: name.into() }
     }
 
     pub fn new_chat_message(

@@ -133,10 +133,7 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
 
     // Inform broker of new client
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    debug!(
-        log,
-        "{:?}: Sending NewPeer to broker for {:?}", client_id, client_id
-    );
+    debug!(log, "Sending NewPeer to broker for {}", client_id.name);
     match broker.send(Event::NewPeer {
         client_id: client_id.clone(),
         sender,
@@ -153,10 +150,9 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
         select! {
             // Handle message coming from client
             message_opt = framed.next() => {
-                debug!(log, "{:?}: Got {:?} from client {:?}", client_id, message_opt, client_id);
+                debug!(log, "Got {:?} from client {}", message_opt, client_id.name);
                 match message_opt {
                     Some(Ok(message)) => match message {
-                        // TODO: Handle name-change message (see below)
                         Message::ErrorMessage(_) => broker.send(Event::Message(message))?,
                         Message::ChatMessage{ sender: _, recipients, message, nonce } =>
                             broker.send(Event::Message(Message::ChatMessage{ sender: Some(client_id.name.clone()), recipients, message, nonce }))?,
@@ -169,16 +165,19 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
 
             // Handle message from broker
             message_opt = receiver.recv() => {
-                debug!(log, "{:?}: Got {:?} from broker", client_id, message_opt);
                 match message_opt {
                     // Send IdentityTaken and disconnect
                     Some(message @ Message::IdentityTaken { .. }) => {
+                        debug!(log, "Sending {:?} to client {}", message, client_id.name);
                         framed.send(message).await?;
                         // Client disconnected in another thread
                         connected = false;
                         break;
                     }
-                    Some(message) => framed.send(message).await?,
+                    Some(message) => {
+                        debug!(log, "Sending {:?} to client {}", message, client_id.name);
+                        framed.send(message).await?;
+                    }
                     None => break,
                 };
             }
@@ -203,23 +202,21 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
 fn add_peer(
     log: &Logger,
     peers: &mut PeerMap,
-    client_id: ClientIdentity,
+    client_id: &ClientIdentity,
     sender: Sender<Message>,
 ) -> Result<()> {
-    debug!(log, "Adding peer {:?}", client_id);
     match peers.entry(client_id.name.clone()) {
         Entry::Occupied(..) => {
             debug!(
                 log,
-                "Already have peer {:?}, sending IdentityTaken and disconnecting", client_id
+                "Already have peer {}, sending IdentityTaken and disconnecting", client_id.name
             );
             sender.send(Message::IdentityTaken {
                 name: client_id.name.clone(),
             })?;
         }
         Entry::Vacant(entry) => {
-            // TODO: Send new peer message to all connected clients
-            debug!(log, "Adding peer {:?} to peers list", client_id);
+            debug!(log, "Adding peer {} to peers list", client_id.name);
             entry.insert(sender);
         }
     };
@@ -235,15 +232,16 @@ async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
         match event {
             Event::Message(message) => handle_chat_message(&log, &mut peers, &message)?,
             Event::NewPeer { client_id, sender } => {
-                add_peer(&log, &mut peers, client_id, sender)?;
+                debug!(log, "Broker got NewPeer for {}", client_id.name);
+                for sender in peers.values() {
+                    sender.send(Message::new_peer(&client_id.name, &client_id.fingerprint))?;
+                }
+                add_peer(&log, &mut peers, &client_id, sender)?;
             }
             Event::PeerDisconnected { name } => {
                 peers.remove(&name);
                 for sender in peers.values() {
-                    sender.send(Message::ErrorMessage(format!(
-                        "client {} disconnected",
-                        name
-                    )))?;
+                    sender.send(Message::peer_disconnected(&name))?;
                 }
             }
         }
@@ -458,18 +456,23 @@ mod tests {
 
         // Wait for message
         let message = framed.next_message().await.unwrap()?;
-        if let Message::ChatMessage {
-            sender,
-            recipients,
-            message,
-            nonce,
-        } = message
-        {
-            let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
-            assert_eq!("Hello", std::str::from_utf8(&msg)?);
-        } else {
-            panic!("Got wrong type of message!");
-        }
+        match message {
+            Message::NewPeer { name, fingerprint } => assert_eq!("bar", name),
+            _ => assert!(false),
+        };
+        let message = framed.next_message().await.unwrap()?;
+        match message {
+            Message::ChatMessage {
+                sender,
+                recipients,
+                message,
+                nonce,
+            } => {
+                let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
+                assert_eq!("Hello", std::str::from_utf8(&msg)?);
+            }
+            _ => assert!(false),
+        };
 
         // Shut down
         // control_sender.send(());
@@ -489,44 +492,50 @@ mod tests {
         // Connect three clients
         let mut framed = connect_client(&path, "foo").await?;
         let mut framed2 = connect_client(&path, "bar").await?;
+        let message = framed.next_message().await.unwrap()?;
+        match message {
+            Message::NewPeer { name, fingerprint } => assert_eq!("bar", name),
+            _ => assert!(false),
+        };
         let mut framed3 = connect_client(&path, "baz").await?;
-
-        // Wait for server
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        let message = framed.next_message().await.unwrap()?;
+        match message {
+            Message::NewPeer { name, fingerprint } => assert_eq!("baz", name),
+            _ => assert!(false),
+        };
 
         // One client sends broadcast message
         framed2
             .send_message(Message::new_chat_message(&session_key, None, "Hello"))
             .await?;
 
-        // Check for message on other two clients
         let message = framed.next_message().await.unwrap()?;
-        if let Message::ChatMessage {
-            sender,
-            recipients,
-            message,
-            nonce,
-        } = message
-        {
-            let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
-            assert_eq!("Hello", std::str::from_utf8(&msg)?);
-        } else {
-            panic!("Got wrong type of message!");
-        }
+        match message {
+            Message::ChatMessage {
+                sender,
+                recipients,
+                message,
+                nonce,
+            } => {
+                let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
+                assert_eq!("Hello", std::str::from_utf8(&msg)?);
+            }
+            _ => assert!(false),
+        };
 
         let message = framed3.next_message().await.unwrap()?;
-        if let Message::ChatMessage {
-            sender,
-            recipients,
-            message,
-            nonce,
-        } = message
-        {
-            let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
-            assert_eq!("Hello", std::str::from_utf8(&msg)?);
-        } else {
-            panic!("Got wrong type of message!");
-        }
+        match message {
+            Message::ChatMessage {
+                sender,
+                recipients,
+                message,
+                nonce,
+            } => {
+                let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
+                assert_eq!("Hello", std::str::from_utf8(&msg)?);
+            }
+            _ => assert!(false),
+        };
 
         // Should really check to make sure the sending client doesn't get it,
         // but since Unix socket peek isn't a thing in Rust, ¯\_(ツ)_/¯
