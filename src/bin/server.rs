@@ -145,6 +145,9 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
         Err(error) => Err(error)?,
     };
 
+    // Is the client connected?
+    let mut connected = true;
+
     // Event loop
     loop {
         select! {
@@ -182,12 +185,15 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
         }
     }
 
-    match broker.send(Event::PeerDisconnected {
-        name: client_id.name.clone(),
-    }) {
-        Ok(_) => (),
-        Err(error) => Err(error)?,
-    };
+    if connected {
+        match broker.send(Event::PeerDisconnected {
+            name: client_id.name.clone(),
+        }) {
+            Ok(_) => (),
+            Err(error) => Err(error)?,
+        };
+    }
+
     drop(broker);
     info!(log, "{} disconnected", client_id.name);
 
