@@ -20,14 +20,10 @@ pub type Receiver<T> = mpsc::UnboundedReceiver<T>;
 pub enum Message {
     Identity {
         name: String,
-        fingerprint: String,
+        public_key: box_::PublicKey,
     },
     IdentityTaken {
         name: String,
-    },
-    NewPeer {
-        name: String,
-        fingerprint: String,
     },
     PeerDisconnected {
         name: String,
@@ -45,14 +41,7 @@ impl Message {
     pub fn identity(name: &str, public_key: &box_::PublicKey) -> Self {
         Message::Identity {
             name: name.into(),
-            fingerprint: fingerprint(public_key.as_ref()),
-        }
-    }
-
-    pub fn new_peer(name: &str, fingerprint: &str) -> Self {
-        Message::NewPeer {
-            name: name.into(),
-            fingerprint: fingerprint.into(),
+            public_key: public_key.clone(),
         }
     }
 
