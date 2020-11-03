@@ -37,6 +37,11 @@ pub enum ServerMessage {
     ErrorMessage(String),
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub enum ClientMessage {
+    ChatMessage(String),
+}
+
 impl ServerMessage {
     pub fn identity(name: &str, public_key: &box_::PublicKey) -> Self {
         ServerMessage::Identity {
@@ -49,18 +54,47 @@ impl ServerMessage {
         ServerMessage::PeerDisconnected { name: name.into() }
     }
 
-    pub fn new_chat_message(
+    pub fn new_client_message<T: serde::Serialize>(
         key: &secretbox::Key,
         recipients: Option<Vec<String>>,
-        message: &str,
-    ) -> Self {
+        message: &T,
+    ) -> Result<Self> {
         let nonce = secretbox::gen_nonce();
-        let encrypted = secretbox::seal(message.as_bytes(), &nonce, key);
-        Self::ClientMessage {
+        let encrypted = secretbox::seal(&rmp_serde::to_vec(message)?, &nonce, key);
+        Ok(Self::ClientMessage {
             sender: None,
             recipients,
             message: encrypted,
             nonce,
+        })
+    }
+
+    pub fn new_chat_message(
+        key: &secretbox::Key,
+        recipients: Option<Vec<String>>,
+        message: &str,
+    ) -> Result<Self> {
+        Self::new_client_message(key, recipients, &ClientMessage::ChatMessage(message.into()))
+    }
+
+    pub fn get_client_message(
+        key: &secretbox::Key,
+        message: &ServerMessage,
+    ) -> Result<ClientMessage> {
+        match message {
+            ServerMessage::ClientMessage {
+                sender: _,
+                recipients: _,
+                message,
+                nonce,
+            } => {
+                let decrypted = match secretbox::open(&message, &nonce, key) {
+                    Ok(decrypted) => decrypted,
+                    Err(_) => Err("Error decrypting message")?,
+                };
+                Ok(rmp_serde::from_read_ref(&decrypted)?)
+            }
+            _ => Err("Not a ClientMessage")?,
         }
     }
 }

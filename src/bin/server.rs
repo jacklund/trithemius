@@ -312,7 +312,7 @@ mod tests {
     use tempfile::NamedTempFile;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{UnixListener, UnixStream};
-    use trithemius::{client_connector::ClientConnector, keyring::Identity};
+    use trithemius::{client_connector::ClientConnector, keyring::Identity, ClientMessage};
 
     // Connect a client to a Unix socket
     async fn connect<P: AsRef<Path>>(path: &P, name: &str) -> Result<ClientConnector<UnixStream>> {
@@ -374,7 +374,7 @@ mod tests {
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
-            ))
+            )?)
             .await?;
 
         // Wait for server
@@ -386,7 +386,7 @@ mod tests {
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
-            ))
+            )?)
             .await
             .is_err());
 
@@ -421,7 +421,7 @@ mod tests {
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
-            ))
+            )?)
             .await
             .is_err());
 
@@ -452,7 +452,7 @@ mod tests {
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
-            ))
+            )?)
             .await?;
 
         // Wait for message
@@ -463,14 +463,11 @@ mod tests {
         };
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::ClientMessage {
-                sender,
-                recipients,
-                message,
-                nonce,
-            } => {
-                let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
-                assert_eq!("Hello", std::str::from_utf8(&msg)?);
+            client_message @ ServerMessage::ClientMessage { .. } => {
+                match ServerMessage::get_client_message(&session_key, &client_message)? {
+                    ClientMessage::ChatMessage(message) => assert_eq!("Hello", message),
+                    _ => assert!(false),
+                };
             }
             _ => assert!(false),
         };
@@ -507,33 +504,31 @@ mod tests {
 
         // One client sends broadcast message
         framed2
-            .send_message(ServerMessage::new_chat_message(&session_key, None, "Hello"))
+            .send_message(ServerMessage::new_chat_message(
+                &session_key,
+                None,
+                "Hello",
+            )?)
             .await?;
 
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::ClientMessage {
-                sender,
-                recipients,
-                message,
-                nonce,
-            } => {
-                let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
-                assert_eq!("Hello", std::str::from_utf8(&msg)?);
+            client_message @ ServerMessage::ClientMessage { .. } => {
+                match ServerMessage::get_client_message(&session_key, &client_message)? {
+                    ClientMessage::ChatMessage(message) => assert_eq!("Hello", message),
+                    _ => assert!(false),
+                };
             }
             _ => assert!(false),
         };
 
         let message = framed3.next_message().await.unwrap()?;
         match message {
-            ServerMessage::ClientMessage {
-                sender,
-                recipients,
-                message,
-                nonce,
-            } => {
-                let msg = secretbox::open(&message, &nonce, &session_key).unwrap();
-                assert_eq!("Hello", std::str::from_utf8(&msg)?);
+            client_message @ ServerMessage::ClientMessage { .. } => {
+                match ServerMessage::get_client_message(&session_key, &client_message)? {
+                    ClientMessage::ChatMessage(message) => assert_eq!("Hello", message),
+                    _ => assert!(false),
+                };
             }
             _ => assert!(false),
         };
@@ -572,7 +567,7 @@ mod tests {
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
-            ))
+            )?)
             .await
             .is_err());
 

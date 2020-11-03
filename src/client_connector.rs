@@ -62,7 +62,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
 
                 // Read from stdin
                 line = lines_from_stdin.next() => match line {
-                    Some(line) => self.send_message(Self::parse_line(line?, &key)).await?,
+                    Some(line) => self.send_message(Self::parse_line(line?, &key)?).await?,
                     None => break,
                 }
 
@@ -102,7 +102,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         }
     }
 
-    fn parse_line(line: String, key: &keyring::Key) -> ServerMessage {
+    fn parse_line(line: String, key: &keyring::Key) -> Result<ServerMessage> {
         // Parse the recipients
         let (dest, msg) = match line.find(':') {
             None => (None, line.to_string()), // No dest, broadcast
@@ -117,6 +117,10 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             ),
         };
         // Encrypt the message
-        ServerMessage::new_chat_message(&key.get_key(), dest, &msg)
+        Ok(ServerMessage::new_client_message(
+            &key.get_key(),
+            dest,
+            &msg,
+        )?)
     }
 }
