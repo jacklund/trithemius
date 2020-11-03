@@ -151,8 +151,8 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
                 match message_opt {
                     Some(Ok(message)) => match message {
                         ServerMessage::ErrorMessage(_) => broker.send(Event::Message(message))?,
-                        ServerMessage::ChatMessage{ sender: _, recipients, message, nonce } =>
-                            broker.send(Event::Message(ServerMessage::ChatMessage{ sender: Some(client_id.clone()), recipients, message, nonce }))?,
+                        ServerMessage::ClientMessage{ sender: _, recipients, message, nonce } =>
+                            broker.send(Event::Message(ServerMessage::ClientMessage{ sender: Some(client_id.clone()), recipients, message, nonce }))?,
                         something => panic!("Unexpected message {:?}", something),
                     },
                     Some(Err(error)) => Err(error)?,
@@ -257,7 +257,7 @@ async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
 fn handle_chat_message(log: &Logger, peers: &mut PeerMap, message: &ServerMessage) -> Result<()> {
     debug!(log, "Got message {:?}", message);
     match message {
-        ServerMessage::ChatMessage {
+        ServerMessage::ClientMessage {
             ref sender,
             ref recipients,
             message: ref _msg,
@@ -463,7 +463,7 @@ mod tests {
         };
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::ChatMessage {
+            ServerMessage::ClientMessage {
                 sender,
                 recipients,
                 message,
@@ -512,7 +512,7 @@ mod tests {
 
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::ChatMessage {
+            ServerMessage::ClientMessage {
                 sender,
                 recipients,
                 message,
@@ -526,7 +526,7 @@ mod tests {
 
         let message = framed3.next_message().await.unwrap()?;
         match message {
-            ServerMessage::ChatMessage {
+            ServerMessage::ClientMessage {
                 sender,
                 recipients,
                 message,

@@ -74,7 +74,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
 
     async fn handle_network_message(key: &keyring::Key, message: ServerMessage) -> Result<()> {
         match message {
-            ServerMessage::ChatMessage {
+            ServerMessage::ClientMessage {
                 sender,
                 recipients: _,
                 message,

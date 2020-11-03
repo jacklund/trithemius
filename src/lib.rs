@@ -28,7 +28,7 @@ pub enum ServerMessage {
     PeerDisconnected {
         name: String,
     },
-    ChatMessage {
+    ClientMessage {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
         message: Vec<u8>,
@@ -56,7 +56,7 @@ impl ServerMessage {
     ) -> Self {
         let nonce = secretbox::gen_nonce();
         let encrypted = secretbox::seal(message.as_bytes(), &nonce, key);
-        Self::ChatMessage {
+        Self::ClientMessage {
             sender: None,
             recipients,
             message: encrypted,
