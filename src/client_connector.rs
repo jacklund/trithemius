@@ -1,4 +1,4 @@
-use crate::{keyring, FramedConnection, Message, Result};
+use crate::{keyring, FramedConnection, Result, ServerMessage};
 use futures::StreamExt;
 use sodiumoxide::crypto::secretbox;
 use tokio::io::{stdin, AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
@@ -28,18 +28,18 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
     pub async fn send_identity(&mut self) -> Result<()> {
         Ok(self
             .sender
-            .send(Message::identity(
+            .send(ServerMessage::identity(
                 &self.name.clone(),
                 &self.identity.public_key,
             ))
             .await?)
     }
 
-    pub async fn send_message(&mut self, message: Message) -> Result<()> {
+    pub async fn send_message(&mut self, message: ServerMessage) -> Result<()> {
         Ok(self.sender.send(message).await?)
     }
 
-    pub async fn next_message(&mut self) -> Option<Result<Message>> {
+    pub async fn next_message(&mut self) -> Option<Result<ServerMessage>> {
         self.sender.next().await.map(|r| r.map_err(|e| e))
     }
 
@@ -72,9 +72,9 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         Ok(())
     }
 
-    async fn handle_network_message(key: &keyring::Key, message: Message) -> Result<()> {
+    async fn handle_network_message(key: &keyring::Key, message: ServerMessage) -> Result<()> {
         match message {
-            Message::ChatMessage {
+            ServerMessage::ChatMessage {
                 sender,
                 recipients: _,
                 message,
@@ -90,11 +90,11 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 }
                 Err(_) => Err(format!("Error decrypting message"))?,
             },
-            Message::IdentityTaken { name } => {
+            ServerMessage::IdentityTaken { name } => {
                 println!("Name {} is taken, please use a different one", name);
                 Ok(())
             }
-            Message::ErrorMessage(error) => {
+            ServerMessage::ErrorMessage(error) => {
                 println!("error: {}", error);
                 Ok(())
             }
@@ -102,7 +102,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         }
     }
 
-    fn parse_line(line: String, key: &keyring::Key) -> Message {
+    fn parse_line(line: String, key: &keyring::Key) -> ServerMessage {
         // Parse the recipients
         let (dest, msg) = match line.find(':') {
             None => (None, line.to_string()), // No dest, broadcast
@@ -117,6 +117,6 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             ),
         };
         // Encrypt the message
-        Message::new_chat_message(&key.get_key(), dest, &msg)
+        ServerMessage::new_chat_message(&key.get_key(), dest, &msg)
     }
 }

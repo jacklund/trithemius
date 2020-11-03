@@ -11,21 +11,21 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_serde::formats::SymmetricalMessagePack;
-use trithemius::{Message, Receiver, Result, Sender};
+use trithemius::{Receiver, Result, Sender, ServerMessage};
 
-type PeerMap = HashMap<String, Sender<Message>>;
+type PeerMap = HashMap<String, Sender<ServerMessage>>;
 
 #[derive(Debug)]
 enum Event {
     NewPeer {
         client_id: String,
-        sender: Sender<Message>,
-        identity_msg: Message,
+        sender: Sender<ServerMessage>,
+        identity_msg: ServerMessage,
     },
     PeerDisconnected {
         name: String,
     },
-    Message(Message),
+    Message(ServerMessage),
 }
 
 // Need this so that I can substitute a UnixListener or TcpListener
@@ -94,14 +94,14 @@ where
     })
 }
 
-async fn read_client_identity<R>(log: &Logger, framed: &mut R) -> Result<(String, Message)>
+async fn read_client_identity<R>(log: &Logger, framed: &mut R) -> Result<(String, ServerMessage)>
 where
-    R: Stream<Item = std::result::Result<Message, std::io::Error>> + std::marker::Unpin,
+    R: Stream<Item = std::result::Result<ServerMessage, std::io::Error>> + std::marker::Unpin,
 {
     match framed.next().await {
-        Some(Ok(Message::Identity { name, public_key })) => {
+        Some(Ok(ServerMessage::Identity { name, public_key })) => {
             let client_id = name.clone();
-            Ok((client_id, Message::Identity { name, public_key }))
+            Ok((client_id, ServerMessage::Identity { name, public_key }))
         }
         Some(Ok(something)) => {
             error!(log, "Got unexpected message {:?}, disconnecting", something);
@@ -120,7 +120,7 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
     // Set up network I/O
     let mut framed = tokio_serde::SymmetricallyFramed::new(
         tokio_util::codec::Framed::new(stream, tokio_util::codec::BytesCodec::new()),
-        SymmetricalMessagePack::<Message>::default(),
+        SymmetricalMessagePack::<ServerMessage>::default(),
     );
 
     // Read client name
@@ -150,9 +150,9 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
                 debug!(log, "Got {:?} from client {}", message_opt, client_id);
                 match message_opt {
                     Some(Ok(message)) => match message {
-                        Message::ErrorMessage(_) => broker.send(Event::Message(message))?,
-                        Message::ChatMessage{ sender: _, recipients, message, nonce } =>
-                            broker.send(Event::Message(Message::ChatMessage{ sender: Some(client_id.clone()), recipients, message, nonce }))?,
+                        ServerMessage::ErrorMessage(_) => broker.send(Event::Message(message))?,
+                        ServerMessage::ChatMessage{ sender: _, recipients, message, nonce } =>
+                            broker.send(Event::Message(ServerMessage::ChatMessage{ sender: Some(client_id.clone()), recipients, message, nonce }))?,
                         something => panic!("Unexpected message {:?}", something),
                     },
                     Some(Err(error)) => Err(error)?,
@@ -164,7 +164,7 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
             message_opt = receiver.recv() => {
                 match message_opt {
                     // Send IdentityTaken and disconnect
-                    Some(message @ Message::IdentityTaken { .. }) => {
+                    Some(message @ ServerMessage::IdentityTaken { .. }) => {
                         debug!(log, "Sending {:?} to client {}", message, client_id);
                         framed.send(message).await?;
                         // Client disconnected in another thread
@@ -200,7 +200,7 @@ fn add_peer(
     log: &Logger,
     peers: &mut PeerMap,
     client_id: &str,
-    sender: Sender<Message>,
+    sender: Sender<ServerMessage>,
 ) -> Result<()> {
     match peers.entry(client_id.into()) {
         Entry::Occupied(..) => {
@@ -208,7 +208,7 @@ fn add_peer(
                 log,
                 "Already have peer {}, sending IdentityTaken and disconnecting", client_id
             );
-            sender.send(Message::IdentityTaken {
+            sender.send(ServerMessage::IdentityTaken {
                 name: client_id.into(),
             })?;
         }
@@ -242,7 +242,7 @@ async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
             Event::PeerDisconnected { name } => {
                 peers.remove(&name);
                 for sender in peers.values() {
-                    sender.send(Message::peer_disconnected(&name))?;
+                    sender.send(ServerMessage::peer_disconnected(&name))?;
                 }
             }
         }
@@ -254,10 +254,10 @@ async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
     Ok(())
 }
 
-fn handle_chat_message(log: &Logger, peers: &mut PeerMap, message: &Message) -> Result<()> {
+fn handle_chat_message(log: &Logger, peers: &mut PeerMap, message: &ServerMessage) -> Result<()> {
     debug!(log, "Got message {:?}", message);
     match message {
-        Message::ChatMessage {
+        ServerMessage::ChatMessage {
             ref sender,
             ref recipients,
             message: ref _msg,
@@ -273,7 +273,7 @@ fn handle_chat_message(log: &Logger, peers: &mut PeerMap, message: &Message) -> 
                             None => {
                                 // Notify sender that one of the recipients wasn't found
                                 if let Some(sender) = peers.get_mut(&sender.clone().unwrap()) {
-                                    sender.send(Message::ErrorMessage(format!(
+                                    sender.send(ServerMessage::ErrorMessage(format!(
                                         "from server: no client '{}' found",
                                         addr
                                     )))?;
@@ -370,7 +370,7 @@ mod tests {
         let name = "foo";
         let mut connector: ClientConnector<UnixStream> = connect(&path, name).await?;
         connector
-            .send_message(Message::new_chat_message(
+            .send_message(ServerMessage::new_chat_message(
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
@@ -382,7 +382,7 @@ mod tests {
 
         // Server should disconnect, so next message attempt should fail
         assert!(connector
-            .send_message(Message::new_chat_message(
+            .send_message(ServerMessage::new_chat_message(
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
@@ -417,7 +417,7 @@ mod tests {
 
         // Server should disconnect, so next message attempt should fail
         assert!(connector
-            .send_message(Message::new_chat_message(
+            .send_message(ServerMessage::new_chat_message(
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
@@ -448,7 +448,7 @@ mod tests {
 
         // Send message from one
         framed2
-            .send_message(Message::new_chat_message(
+            .send_message(ServerMessage::new_chat_message(
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",
@@ -458,12 +458,12 @@ mod tests {
         // Wait for message
         let message = framed.next_message().await.unwrap()?;
         match message {
-            Message::Identity { name, public_key } => assert_eq!("bar", name),
+            ServerMessage::Identity { name, public_key } => assert_eq!("bar", name),
             _ => assert!(false),
         };
         let message = framed.next_message().await.unwrap()?;
         match message {
-            Message::ChatMessage {
+            ServerMessage::ChatMessage {
                 sender,
                 recipients,
                 message,
@@ -495,24 +495,24 @@ mod tests {
         let mut framed2 = connect_client(&path, "bar").await?;
         let message = framed.next_message().await.unwrap()?;
         match message {
-            Message::Identity { name, public_key } => assert_eq!("bar", name),
+            ServerMessage::Identity { name, public_key } => assert_eq!("bar", name),
             _ => assert!(false),
         };
         let mut framed3 = connect_client(&path, "baz").await?;
         let message = framed.next_message().await.unwrap()?;
         match message {
-            Message::Identity { name, public_key } => assert_eq!("baz", name),
+            ServerMessage::Identity { name, public_key } => assert_eq!("baz", name),
             _ => assert!(false),
         };
 
         // One client sends broadcast message
         framed2
-            .send_message(Message::new_chat_message(&session_key, None, "Hello"))
+            .send_message(ServerMessage::new_chat_message(&session_key, None, "Hello"))
             .await?;
 
         let message = framed.next_message().await.unwrap()?;
         match message {
-            Message::ChatMessage {
+            ServerMessage::ChatMessage {
                 sender,
                 recipients,
                 message,
@@ -526,7 +526,7 @@ mod tests {
 
         let message = framed3.next_message().await.unwrap()?;
         match message {
-            Message::ChatMessage {
+            ServerMessage::ChatMessage {
                 sender,
                 recipients,
                 message,
@@ -564,11 +564,11 @@ mod tests {
         // Wait for message
         let message = framed2.next_message().await.unwrap()?;
 
-        assert_eq!(Message::IdentityTaken { name: "foo".into() }, message);
+        assert_eq!(ServerMessage::IdentityTaken { name: "foo".into() }, message);
 
         // Server should disconnect, so next message attempt should fail
         assert!(framed2
-            .send_message(Message::new_chat_message(
+            .send_message(ServerMessage::new_chat_message(
                 &session_key,
                 Some(vec!["foo".into()]),
                 "Hello",

@@ -17,7 +17,7 @@ pub type Sender<T> = mpsc::UnboundedSender<T>;
 pub type Receiver<T> = mpsc::UnboundedReceiver<T>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub enum Message {
+pub enum ServerMessage {
     Identity {
         name: String,
         public_key: box_::PublicKey,
@@ -37,16 +37,16 @@ pub enum Message {
     ErrorMessage(String),
 }
 
-impl Message {
+impl ServerMessage {
     pub fn identity(name: &str, public_key: &box_::PublicKey) -> Self {
-        Message::Identity {
+        ServerMessage::Identity {
             name: name.into(),
             public_key: public_key.clone(),
         }
     }
 
     pub fn peer_disconnected(name: &str) -> Self {
-        Message::PeerDisconnected { name: name.into() }
+        ServerMessage::PeerDisconnected { name: name.into() }
     }
 
     pub fn new_chat_message(
@@ -68,9 +68,9 @@ impl Message {
 pub struct FramedConnection<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     framed: tokio_serde::Framed<
         tokio_util::codec::Framed<T, tokio_util::codec::BytesCodec>,
-        Message,
-        Message,
-        tokio_serde::formats::MessagePack<Message, Message>,
+        ServerMessage,
+        ServerMessage,
+        tokio_serde::formats::MessagePack<ServerMessage, ServerMessage>,
     >,
 }
 
@@ -79,7 +79,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> FramedConnection<T> {
         Self {
             framed: tokio_serde::SymmetricallyFramed::new(
                 tokio_util::codec::Framed::new(connection, tokio_util::codec::BytesCodec::new()),
-                SymmetricalMessagePack::<Message>::default(),
+                SymmetricalMessagePack::<ServerMessage>::default(),
             ),
         }
     }
@@ -88,11 +88,11 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> FramedConnection<T> {
         self.framed.get_mut()
     }
 
-    pub async fn send(&mut self, message: Message) -> Result<()> {
+    pub async fn send(&mut self, message: ServerMessage) -> Result<()> {
         Ok(self.framed.send(message).await?)
     }
 
-    pub async fn next(&mut self) -> Option<Result<Message>> {
+    pub async fn next(&mut self) -> Option<Result<ServerMessage>> {
         match self.framed.next().await {
             None => None,
             Some(Ok(message)) => Some(Ok(message)),
