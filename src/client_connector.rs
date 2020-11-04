@@ -79,17 +79,23 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 recipients: _,
                 message,
                 nonce,
-            } => match secretbox::open(&message, &nonce, &key.get_key()) {
-                Ok(plaintext) => {
-                    println!(
-                        "from {}: {}",
-                        sender.unwrap_or("unknown sender".into()),
-                        std::str::from_utf8(&plaintext)?
-                    );
-                    Ok(())
+            } => {
+                let nonce = match secretbox::Nonce::from_slice(&nonce) {
+                    Some(nonce) => nonce,
+                    None => Err("Error converting nonce from bytes in message")?,
+                };
+                match secretbox::open(&message, &nonce, &key.get_key()) {
+                    Ok(plaintext) => {
+                        println!(
+                            "from {}: {}",
+                            sender.unwrap_or("unknown sender".into()),
+                            std::str::from_utf8(&plaintext)?
+                        );
+                        Ok(())
+                    }
+                    Err(_) => Err(format!("Error decrypting message"))?,
                 }
-                Err(_) => Err(format!("Error decrypting message"))?,
-            },
+            }
             ServerMessage::IdentityTaken { name } => {
                 println!("Name {} is taken, please use a different one", name);
                 Ok(())
@@ -117,10 +123,6 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             ),
         };
         // Encrypt the message
-        Ok(ServerMessage::new_client_message(
-            &key.get_key(),
-            dest,
-            &msg,
-        )?)
+        Ok(ServerMessage::new_chat_message(&key.get_key(), dest, &msg)?)
     }
 }

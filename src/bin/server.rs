@@ -11,14 +11,15 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_serde::formats::SymmetricalMessagePack;
-use trithemius::{Receiver, Result, Sender, ServerMessage};
+use trithemius::{Identity, Receiver, Result, Sender, ServerMessage};
 
 type PeerMap = HashMap<String, Sender<ServerMessage>>;
+type ClientMap = HashMap<String, Identity>;
 
 #[derive(Debug)]
 enum Event {
     NewPeer {
-        client_id: String,
+        client_id: Identity,
         sender: Sender<ServerMessage>,
         identity_msg: ServerMessage,
     },
@@ -94,15 +95,18 @@ where
     })
 }
 
-async fn read_client_identity<R>(log: &Logger, framed: &mut R) -> Result<(String, ServerMessage)>
+async fn read_client_identity<R>(log: &Logger, framed: &mut R) -> Result<(Identity, ServerMessage)>
 where
     R: Stream<Item = std::result::Result<ServerMessage, std::io::Error>> + std::marker::Unpin,
 {
     match framed.next().await {
-        Some(Ok(ServerMessage::Identity { name, public_key })) => {
-            let client_id = name.clone();
-            Ok((client_id, ServerMessage::Identity { name, public_key }))
-        }
+        Some(Ok(ServerMessage::Identity(Identity { name, public_key }))) => Ok((
+            Identity {
+                name: name.clone(),
+                public_key,
+            },
+            ServerMessage::identity(&name, &public_key),
+        )),
         Some(Ok(something)) => {
             error!(log, "Got unexpected message {:?}, disconnecting", something);
             Err("Unexpected message type")?
@@ -125,11 +129,11 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
 
     // Read client name
     let (client_id, identity_msg) = read_client_identity(&log, &mut framed).await?;
-    info!(log, "{} connected", client_id);
+    info!(log, "{} connected", client_id.name);
 
     // Inform broker of new client
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    debug!(log, "Sending Identity to broker for {}", client_id);
+    debug!(log, "Sending Identity to broker for {}", client_id.name);
     match broker.send(Event::NewPeer {
         client_id: client_id.clone(),
         sender,
@@ -147,12 +151,12 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
         select! {
             // Handle message coming from client
             message_opt = framed.next() => {
-                debug!(log, "Got {:?} from client {}", message_opt, client_id);
+                debug!(log, "Got {:?} from client {}", message_opt, client_id.name);
                 match message_opt {
                     Some(Ok(message)) => match message {
                         ServerMessage::ErrorMessage(_) => broker.send(Event::Message(message))?,
                         ServerMessage::ClientMessage{ sender: _, recipients, message, nonce } =>
-                            broker.send(Event::Message(ServerMessage::ClientMessage{ sender: Some(client_id.clone()), recipients, message, nonce }))?,
+                            broker.send(Event::Message(ServerMessage::ClientMessage{ sender: Some(client_id.name.clone()), recipients, message, nonce }))?,
                         something => panic!("Unexpected message {:?}", something),
                     },
                     Some(Err(error)) => Err(error)?,
@@ -165,14 +169,14 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
                 match message_opt {
                     // Send IdentityTaken and disconnect
                     Some(message @ ServerMessage::IdentityTaken { .. }) => {
-                        debug!(log, "Sending {:?} to client {}", message, client_id);
+                        debug!(log, "Sending {:?} to client {}", message, client_id.name);
                         framed.send(message).await?;
                         // Client disconnected in another thread
                         connected = false;
                         break;
                     }
                     Some(message) => {
-                        debug!(log, "Sending {:?} to client {}", message, client_id);
+                        debug!(log, "Sending {:?} to client {}", message, client_id.name);
                         framed.send(message).await?;
                     }
                     None => break,
@@ -183,7 +187,7 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
 
     if connected {
         match broker.send(Event::PeerDisconnected {
-            name: client_id.clone(),
+            name: client_id.name.clone(),
         }) {
             Ok(_) => (),
             Err(error) => Err(error)?,
@@ -191,7 +195,7 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
     }
 
     drop(broker);
-    info!(log, "{} disconnected", client_id);
+    info!(log, "{} disconnected", client_id.name);
 
     Ok(())
 }
@@ -222,6 +226,7 @@ fn add_peer(
 
 async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
     let mut peers = PeerMap::new();
+    let mut client_map = ClientMap::new();
 
     debug!(log, "Starting broker event loop");
     while let Some(event) = events.next().await {
@@ -233,14 +238,16 @@ async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
                 sender,
                 identity_msg,
             } => {
-                debug!(log, "Broker got NewPeer for {}", client_id);
+                debug!(log, "Broker got NewPeer for {}", client_id.name);
+                client_map.insert(client_id.name.clone(), client_id.clone());
                 for sender in peers.values() {
                     sender.send(identity_msg.clone())?;
                 }
-                add_peer(&log, &mut peers, &client_id, sender)?;
+                add_peer(&log, &mut peers, &client_id.name, sender)?;
             }
             Event::PeerDisconnected { name } => {
                 peers.remove(&name);
+                client_map.remove(&name);
                 for sender in peers.values() {
                     sender.send(ServerMessage::peer_disconnected(&name))?;
                 }
@@ -312,14 +319,19 @@ mod tests {
     use tempfile::NamedTempFile;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{UnixListener, UnixStream};
-    use trithemius::{client_connector::ClientConnector, keyring::Identity, ClientMessage};
+    use trithemius::{client_connector::ClientConnector, keyring, ClientMessage, Identity};
 
     // Connect a client to a Unix socket
     async fn connect<P: AsRef<Path>>(path: &P, name: &str) -> Result<ClientConnector<UnixStream>> {
         loop {
             match UnixStream::connect(path).await {
                 Ok(stream) => {
-                    return Ok(ClientConnector::connect(stream, &Identity::new(name), &name).await?)
+                    return Ok(ClientConnector::connect(
+                        stream,
+                        &keyring::Identity::new(name),
+                        &name,
+                    )
+                    .await?)
                 }
                 Err(error) => std::thread::sleep(std::time::Duration::from_secs(1)),
             }
@@ -458,7 +470,7 @@ mod tests {
         // Wait for message
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::Identity { name, public_key } => assert_eq!("bar", name),
+            ServerMessage::Identity(Identity { name, public_key }) => assert_eq!("bar", name),
             _ => assert!(false),
         };
         let message = framed.next_message().await.unwrap()?;
@@ -492,13 +504,13 @@ mod tests {
         let mut framed2 = connect_client(&path, "bar").await?;
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::Identity { name, public_key } => assert_eq!("bar", name),
+            ServerMessage::Identity(Identity { name, public_key }) => assert_eq!("bar", name),
             _ => assert!(false),
         };
         let mut framed3 = connect_client(&path, "baz").await?;
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::Identity { name, public_key } => assert_eq!("baz", name),
+            ServerMessage::Identity(Identity { name, public_key }) => assert_eq!("baz", name),
             _ => assert!(false),
         };
 

@@ -17,11 +17,14 @@ pub type Sender<T> = mpsc::UnboundedSender<T>;
 pub type Receiver<T> = mpsc::UnboundedReceiver<T>;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Identity {
+    pub name: String,
+    pub public_key: box_::PublicKey,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ServerMessage {
-    Identity {
-        name: String,
-        public_key: box_::PublicKey,
-    },
+    Identity(Identity),
     IdentityTaken {
         name: String,
     },
@@ -32,40 +35,34 @@ pub enum ServerMessage {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
         message: Vec<u8>,
-        nonce: secretbox::Nonce,
+        nonce: Vec<u8>,
     },
+    ListUsers,
     ErrorMessage(String),
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub enum ClientMessage {
-    ChatMessage(String),
 }
 
 impl ServerMessage {
     pub fn identity(name: &str, public_key: &box_::PublicKey) -> Self {
-        ServerMessage::Identity {
+        ServerMessage::Identity(Identity {
             name: name.into(),
             public_key: public_key.clone(),
-        }
+        })
     }
 
     pub fn peer_disconnected(name: &str) -> Self {
         ServerMessage::PeerDisconnected { name: name.into() }
     }
 
-    pub fn new_client_message<T: serde::Serialize>(
-        key: &secretbox::Key,
+    pub fn new_client_message(
         recipients: Option<Vec<String>>,
-        message: &T,
+        nonce: &[u8],
+        encrypted: &[u8],
     ) -> Result<Self> {
-        let nonce = secretbox::gen_nonce();
-        let encrypted = secretbox::seal(&rmp_serde::to_vec(message)?, &nonce, key);
         Ok(Self::ClientMessage {
             sender: None,
             recipients,
-            message: encrypted,
-            nonce,
+            message: encrypted.to_vec(),
+            nonce: nonce.to_vec(),
         })
     }
 
@@ -74,7 +71,35 @@ impl ServerMessage {
         recipients: Option<Vec<String>>,
         message: &str,
     ) -> Result<Self> {
-        Self::new_client_message(key, recipients, &ClientMessage::ChatMessage(message.into()))
+        let nonce = secretbox::gen_nonce();
+        let encrypted = secretbox::seal(
+            &rmp_serde::to_vec(&ClientMessage::ChatMessage(message.into()))?,
+            &nonce,
+            key,
+        );
+        Self::new_client_message(recipients, nonce.as_ref(), &encrypted)
+    }
+
+    pub fn new_chat_invite(
+        name: Option<String>,
+        participants: Option<Vec<String>>,
+        public_key: &box_::PublicKey,
+        secret_key: &box_::SecretKey,
+        recipients: Option<Vec<String>>,
+        chat_key: &secretbox::Key,
+    ) -> Result<Self> {
+        let nonce = box_::gen_nonce();
+        let encrypted = box_::seal(
+            &rmp_serde::to_vec(&ClientMessage::ChatInvite {
+                name,
+                participants,
+                key: chat_key.clone(),
+            })?,
+            &nonce,
+            public_key,
+            secret_key,
+        );
+        Self::new_client_message(recipients, nonce.as_ref(), &encrypted)
     }
 
     pub fn get_client_message(
@@ -88,6 +113,10 @@ impl ServerMessage {
                 message,
                 nonce,
             } => {
+                let nonce = match secretbox::Nonce::from_slice(&nonce) {
+                    Some(nonce) => nonce,
+                    None => Err("Error converting nonce from bytes in message")?,
+                };
                 let decrypted = match secretbox::open(&message, &nonce, key) {
                     Ok(decrypted) => decrypted,
                     Err(_) => Err("Error decrypting message")?,
@@ -97,6 +126,16 @@ impl ServerMessage {
             _ => Err("Not a ClientMessage")?,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub enum ClientMessage {
+    ChatInvite {
+        name: Option<String>,
+        participants: Option<Vec<String>>,
+        key: secretbox::Key,
+    },
+    ChatMessage(String),
 }
 
 pub struct FramedConnection<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
