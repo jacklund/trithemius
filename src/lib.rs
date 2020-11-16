@@ -25,12 +25,12 @@ pub struct Identity {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ServerMessage {
     Identity(Identity),
+    Peers(Vec<Identity>),
     IdentityTaken {
         name: String,
     },
-    PeerDisconnected {
-        name: String,
-    },
+    PeerJoined(Identity),
+    PeerDisconnected(String),
     ClientMessage {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
@@ -50,7 +50,7 @@ impl ServerMessage {
     }
 
     pub fn peer_disconnected(name: &str) -> Self {
-        ServerMessage::PeerDisconnected { name: name.into() }
+        ServerMessage::PeerDisconnected(name.into())
     }
 
     pub fn new_client_message(

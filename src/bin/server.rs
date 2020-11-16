@@ -21,7 +21,6 @@ enum Event {
     NewPeer {
         client_id: Identity,
         sender: Sender<ServerMessage>,
-        identity_msg: ServerMessage,
     },
     PeerDisconnected {
         name: String,
@@ -37,11 +36,13 @@ macro_rules! server_event_loop {
 
         loop {
             let (stream, _socket_addr) = $listener.accept().await?;
-            info!($log, "Accepting from: {:?}", stream.peer_addr()?);
+            let peer_addr = stream.peer_addr()?;
+            info!($log, "Accepting from: {:?}", peer_addr);
             spawn_and_log_error(handle_connection(
                 $log.new(o!()),
                 broker_sender.clone(),
                 stream,
+                format!("{:?}", peer_addr),
             ));
         }
     };
@@ -95,18 +96,12 @@ where
     })
 }
 
-async fn read_client_identity<R>(log: &Logger, framed: &mut R) -> Result<(Identity, ServerMessage)>
+async fn read_client_identity<R>(log: &Logger, framed: &mut R) -> Result<Identity>
 where
     R: Stream<Item = std::result::Result<ServerMessage, std::io::Error>> + std::marker::Unpin,
 {
     match framed.next().await {
-        Some(Ok(ServerMessage::Identity(Identity { name, public_key }))) => Ok((
-            Identity {
-                name: name.clone(),
-                public_key,
-            },
-            ServerMessage::identity(&name, &public_key),
-        )),
+        Some(Ok(ServerMessage::Identity(identity))) => Ok(identity),
         Some(Ok(something)) => {
             error!(log, "Got unexpected message {:?}, disconnecting", something);
             Err("Unexpected message type")?
@@ -117,10 +112,13 @@ where
 }
 
 async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
-    log: Logger,
+    mut log: Logger,
     broker: Sender<Event>,
     stream: T,
+    peer_addr: String,
 ) -> Result<()> {
+    log = log.new(o!("peer_addr" => peer_addr));
+
     // Set up network I/O
     let mut framed = tokio_serde::SymmetricallyFramed::new(
         tokio_util::codec::Framed::new(stream, tokio_util::codec::BytesCodec::new()),
@@ -128,16 +126,16 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
     );
 
     // Read client name
-    let (client_id, identity_msg) = read_client_identity(&log, &mut framed).await?;
+    let client_id = read_client_identity(&log, &mut framed).await?;
     info!(log, "{} connected", client_id.name);
+    log = log.new(o!("client_id" => client_id.name.clone()));
 
     // Inform broker of new client
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    debug!(log, "Sending Identity to broker for {}", client_id.name);
+    debug!(log, "Sending NewPeer to broker");
     match broker.send(Event::NewPeer {
         client_id: client_id.clone(),
         sender,
-        identity_msg,
     }) {
         Ok(_) => (),
         Err(error) => Err(error)?,
@@ -151,7 +149,7 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
         select! {
             // Handle message coming from client
             message_opt = framed.next() => {
-                debug!(log, "Got {:?} from client {}", message_opt, client_id.name);
+                debug!(log, "Got {:?} from client", message_opt);
                 match message_opt {
                     Some(Ok(message)) => match message {
                         ServerMessage::ErrorMessage(_) => broker.send(Event::Message(message))?,
@@ -169,14 +167,14 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
                 match message_opt {
                     // Send IdentityTaken and disconnect
                     Some(message @ ServerMessage::IdentityTaken { .. }) => {
-                        debug!(log, "Sending {:?} to client {}", message, client_id.name);
+                        debug!(log, "Sending {:?} to client", message);
                         framed.send(message).await?;
                         // Client disconnected in another thread
                         connected = false;
                         break;
                     }
                     Some(message) => {
-                        debug!(log, "Sending {:?} to client {}", message, client_id.name);
+                        debug!(log, "Sending {:?} to client", message);
                         framed.send(message).await?;
                     }
                     None => break,
@@ -195,7 +193,7 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
     }
 
     drop(broker);
-    info!(log, "{} disconnected", client_id.name);
+    info!(log, "client disconnected");
 
     Ok(())
 }
@@ -233,15 +231,14 @@ async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
         debug!(log, "Got broker event {:?}", event);
         match event {
             Event::Message(message) => handle_chat_message(&log, &mut peers, &message)?,
-            Event::NewPeer {
-                client_id,
-                sender,
-                identity_msg,
-            } => {
+            Event::NewPeer { client_id, sender } => {
                 debug!(log, "Broker got NewPeer for {}", client_id.name);
+                sender.send(ServerMessage::Peers(
+                    client_map.values().map(|i| i.clone()).collect(),
+                ))?;
                 client_map.insert(client_id.name.clone(), client_id.clone());
                 for sender in peers.values() {
-                    sender.send(identity_msg.clone())?;
+                    sender.send(ServerMessage::PeerJoined(client_id.clone()))?;
                 }
                 add_peer(&log, &mut peers, &client_id.name, sender)?;
             }
@@ -322,31 +319,24 @@ mod tests {
     use trithemius::{client_connector::ClientConnector, keyring, ClientMessage, Identity};
 
     // Connect a client to a Unix socket
-    async fn connect<P: AsRef<Path>>(path: &P, name: &str) -> Result<ClientConnector<UnixStream>> {
+    async fn connect_client<P: AsRef<Path>>(
+        path: &P,
+        name: &str,
+        log: &Logger,
+    ) -> Result<(ClientConnector<UnixStream>, keyring::Identity)> {
         loop {
+            let identity = keyring::Identity::new(name);
             match UnixStream::connect(path).await {
                 Ok(stream) => {
-                    return Ok(ClientConnector::connect(
-                        stream,
-                        &keyring::Identity::new(name),
-                        &name,
-                    )
-                    .await?)
+                    let keyring = keyring::KeyRing::default();
+                    let mut client_connector =
+                        ClientConnector::new(&identity, &name, Some(log.new(o!())));
+                    client_connector.connect(stream, &keyring).await?;
+                    return Ok((client_connector, identity));
                 }
                 Err(error) => std::thread::sleep(std::time::Duration::from_secs(1)),
             }
         }
-    }
-
-    // Connect a client and send identity
-    async fn connect_client<P: AsRef<Path>>(
-        path: &P,
-        name: &str,
-    ) -> Result<ClientConnector<UnixStream>> {
-        let mut connector: ClientConnector<UnixStream> = connect(&path, name).await?;
-        connector.send_identity().await?;
-
-        Ok(connector)
     }
 
     // Test setup
@@ -371,44 +361,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_sending_unexpected_message() -> Result<()> {
-        let (log, path, session_key) = setup()?;
-        let listener = UnixListener::bind(path.clone())?;
-        let new_log = log.new(o!());
-        spawn_and_log_error(async move {
-            server_event_loop!(listener, path, new_log);
-        });
-
-        let name = "foo";
-        let mut connector: ClientConnector<UnixStream> = connect(&path, name).await?;
-        connector
-            .send_message(ServerMessage::new_chat_message(
-                &session_key,
-                Some(vec!["foo".into()]),
-                "Hello",
-            )?)
-            .await?;
-
-        // Wait for server
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
-        // Server should disconnect, so next message attempt should fail
-        assert!(connector
-            .send_message(ServerMessage::new_chat_message(
-                &session_key,
-                Some(vec!["foo".into()]),
-                "Hello",
-            )?)
-            .await
-            .is_err());
-
-        // Shut down
-        teardown(&path);
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn test_sending_garbage_message() -> Result<()> {
         let (log, path, session_key) = setup()?;
         let listener = UnixListener::bind(path.clone())?;
@@ -418,11 +370,16 @@ mod tests {
         });
 
         let name = "foo";
-        let mut connector: ClientConnector<UnixStream> = connect(&path, name).await?;
-        connector
-            .get_mut()
-            .send("You won't like that".as_bytes().into())
-            .await?;
+        let (mut connector, _) = connect_client(&path, name, &log).await?;
+        match &mut connector.connection {
+            Some(connection) => {
+                connection
+                    .get_mut()
+                    .send("You won't like that".as_bytes().into())
+                    .await?
+            }
+            None => panic!("there should be a connection!"),
+        };
 
         // Wait for server
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -447,13 +404,14 @@ mod tests {
     async fn test_sending_recipient_message() -> Result<()> {
         let (log, path, session_key) = setup()?;
         let listener = UnixListener::bind(path.clone())?;
+        let my_log = log.new(o!());
         spawn_and_log_error(async move {
-            server_event_loop!(listener, path, log);
+            server_event_loop!(listener, path, my_log);
         });
 
         // Connect two clients to server
-        let mut framed = connect_client(&path, "foo").await?;
-        let mut framed2 = connect_client(&path, "bar").await?;
+        let (mut framed, identity) = connect_client(&path, "foo", &log).await?;
+        let (mut framed2, identity2) = connect_client(&path, "bar", &log).await?;
 
         // Wait for server
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -470,8 +428,11 @@ mod tests {
         // Wait for message
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::Identity(Identity { name, public_key }) => assert_eq!("bar", name),
-            _ => assert!(false),
+            ServerMessage::PeerJoined(Identity { name, public_key }) => assert_eq!("bar", name),
+            message => {
+                debug!(log, "Expected client message, got {:?}", message);
+                assert!(false);
+            }
         };
         let message = framed.next_message().await.unwrap()?;
         match message {
@@ -481,7 +442,10 @@ mod tests {
                     _ => assert!(false),
                 };
             }
-            _ => assert!(false),
+            message => {
+                debug!(log, "Expected client message, got {:?}", message);
+                assert!(false);
+            }
         };
 
         // Shut down
@@ -495,23 +459,30 @@ mod tests {
     async fn test_sending_broadcast_message() -> Result<()> {
         let (log, path, session_key) = setup()?;
         let listener = UnixListener::bind(path.clone())?;
+        let my_log = log.new(o!());
         spawn_and_log_error(async move {
-            server_event_loop!(listener, path, log);
+            server_event_loop!(listener, path, my_log);
         });
 
         // Connect three clients
-        let mut framed = connect_client(&path, "foo").await?;
-        let mut framed2 = connect_client(&path, "bar").await?;
+        let (mut framed, _) = connect_client(&path, "foo", &log).await?;
+        let (mut framed2, _) = connect_client(&path, "bar", &log).await?;
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::Identity(Identity { name, public_key }) => assert_eq!("bar", name),
-            _ => assert!(false),
+            ServerMessage::PeerJoined(Identity { name, public_key }) => assert_eq!("bar", name),
+            message => {
+                debug!(log, "Expected client message, got {:?}", message);
+                assert!(false);
+            }
         };
-        let mut framed3 = connect_client(&path, "baz").await?;
+        let (mut framed3, _) = connect_client(&path, "baz", &log).await?;
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::Identity(Identity { name, public_key }) => assert_eq!("baz", name),
-            _ => assert!(false),
+            ServerMessage::PeerJoined(Identity { name, public_key }) => assert_eq!("baz", name),
+            message => {
+                debug!(log, "Expected client message, got {:?}", message);
+                assert!(false);
+            }
         };
 
         // One client sends broadcast message
@@ -528,10 +499,16 @@ mod tests {
             client_message @ ServerMessage::ClientMessage { .. } => {
                 match ServerMessage::get_client_message(&session_key, &client_message)? {
                     ClientMessage::ChatMessage(message) => assert_eq!("Hello", message),
-                    _ => assert!(false),
+                    message => {
+                        debug!(log, "Expected chat message, got {:?}", message);
+                        assert!(false);
+                    }
                 };
             }
-            _ => assert!(false),
+            message => {
+                debug!(log, "Expected client message, got {:?}", message);
+                assert!(false);
+            }
         };
 
         let message = framed3.next_message().await.unwrap()?;
@@ -539,10 +516,16 @@ mod tests {
             client_message @ ServerMessage::ClientMessage { .. } => {
                 match ServerMessage::get_client_message(&session_key, &client_message)? {
                     ClientMessage::ChatMessage(message) => assert_eq!("Hello", message),
-                    _ => assert!(false),
+                    message => {
+                        debug!(log, "Expected chat message, got {:?}", message);
+                        assert!(false);
+                    }
                 };
             }
-            _ => assert!(false),
+            message => {
+                debug!(log, "Expected client message, got {:?}", message);
+                assert!(false);
+            }
         };
 
         // Should really check to make sure the sending client doesn't get it,
@@ -562,16 +545,11 @@ mod tests {
         });
 
         // Connect two clients to server
-        let mut framed = connect_client(&path, "foo").await?;
-        let mut framed2 = connect_client(&path, "foo").await?;
+        let (mut framed, _) = connect_client(&path, "foo", &log).await?;
+        let (mut framed2, _) = connect_client(&path, "foo", &log).await?;
 
         // Wait for server
         std::thread::sleep(std::time::Duration::from_secs(1));
-
-        // Wait for message
-        let message = framed2.next_message().await.unwrap()?;
-
-        assert_eq!(ServerMessage::IdentityTaken { name: "foo".into() }, message);
 
         // Server should disconnect, so next message attempt should fail
         assert!(framed2

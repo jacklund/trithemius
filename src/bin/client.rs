@@ -1,8 +1,51 @@
 use clap::{App, AppSettings, Arg, SubCommand};
 use sodiumoxide::crypto::secretbox;
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
+use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
-use trithemius::{client_connector::ClientConnector, keyring::KeyRing, Result};
+use tokio::select;
+use tokio::stream::StreamExt;
+use tokio::sync::mpsc;
+use trithemius::{
+    client_connector::{ClientConnector, Event},
+    keyring, Receiver, Result, Sender,
+};
+
+async fn connect_and_run(
+    name: String,
+    socket_addr: SocketAddr,
+    identity: keyring::Identity,
+    connector_receiver: Receiver<Event>,
+    connector_sender: Sender<Event>,
+    server_key: Option<keyring::Key>,
+    keyring: keyring::KeyRing,
+) -> Result<()> {
+    let mut client_connector = ClientConnector::new(&identity, &name, None);
+    Ok(client_connector
+        .connect(TcpStream::connect(socket_addr).await?, &keyring)
+        .await?)
+}
+
+fn parse_line(line: String) -> Result<Event> {
+    // Parse the recipients
+    let (dest, msg) = match line.find(':') {
+        None => (None, line.to_string()), // No dest, broadcast
+        Some(idx) => (
+            Some(
+                line[..idx]
+                    .split(',')
+                    .map(|name| name.trim().to_string())
+                    .collect::<Vec<String>>(),
+            ),
+            line[idx + 1..].trim().to_string(),
+        ),
+    };
+    Ok(Event::ChatMessage {
+        chat_name: None,
+        recipients: dest,
+        message: msg,
+    })
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -76,7 +119,7 @@ async fn main() -> Result<()> {
         None => Err("Unable to find home directory")?,
     };
     keyfile.push(".trithemius");
-    let (mut keyring, mut keyring_file) = KeyRing::read_from_file(&keyfile, &password)?;
+    let (mut keyring, mut keyring_file) = keyring::KeyRing::read_from_file(&keyfile, &password)?;
 
     match matches.subcommand() {
         ("connect", Some(connect_matches)) => {
@@ -88,22 +131,35 @@ async fn main() -> Result<()> {
                 None => identity_name,
             };
             let identity = match keyring.get_identity(&identity_name) {
-                Some(identity) => identity,
+                Some(ref identity) => identity.clone(),
                 None => Err(format!("Couldn't find identity '{}'", name))?,
             };
-            let key = match keyring.get_key(&address) {
-                Some(key) => key,
-                None => Err(format!(
-                    "Key for {} not found; '{} key add {}' to add key",
-                    name,
-                    app.get_name(),
-                    name
-                ))?,
-            };
-            ClientConnector::connect(TcpStream::connect(socket_addr).await?, &identity, &name)
-                .await?
-                .handle_events(&key)
-                .await?;
+            let (mut event_sender, connector_receiver) = mpsc::unbounded_channel();
+            let (connector_sender, mut event_receiver) = mpsc::unbounded_channel();
+            let server_key = keyring.get_key(&address).map(|k| k.clone());
+            let my_keyring = keyring.clone();
+            tokio::task::spawn(connect_and_run(
+                name.into(),
+                socket_addr,
+                identity.clone(),
+                connector_receiver,
+                connector_sender,
+                server_key,
+                my_keyring,
+            ))
+            .await??;
+            loop {
+                // Set up terminal I/O
+                let mut lines_from_stdin = BufReader::new(stdin()).lines().fuse();
+
+                select! {
+                    event = event_receiver.recv() => unimplemented!(),
+                    line = lines_from_stdin.next() => match line {
+                        Some(line) => event_sender.send(parse_line(line?)?)?,
+                        None => break,
+                    }
+                }
+            }
         }
         ("identity", Some(identity_matches)) => {
             match identity_matches.subcommand() {

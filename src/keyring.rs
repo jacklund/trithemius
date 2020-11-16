@@ -1,5 +1,5 @@
 use crate::{derive_file_encryption_key, fingerprint, Result};
-use sodiumoxide::crypto::{box_, hash, pwhash, secretbox};
+use sodiumoxide::crypto::{box_, pwhash, secretbox};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
@@ -13,7 +13,7 @@ pub struct Identity {
     pub secret_key: box_::SecretKey,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Contact {
     name: String,
     public_keys: Vec<box_::PublicKey>,
@@ -202,6 +202,16 @@ impl KeyRing {
 
     pub fn get_contact(&self, name: &str) -> Option<&Contact> {
         self.contacts.get(name)
+    }
+
+    pub fn find_contact(&self, public_key: &box_::PublicKey) -> Option<&Contact> {
+        for contact in self.contacts.values() {
+            if contact.public_keys.contains(public_key) {
+                return Some(contact);
+            }
+        }
+
+        None
     }
 
     pub fn add_contact(&mut self, contact: &Contact) -> Result<()> {
