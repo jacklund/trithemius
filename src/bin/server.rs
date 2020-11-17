@@ -306,15 +306,11 @@ fn handle_chat_message(log: &Logger, peers: &mut PeerMap, message: &ServerMessag
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
-    use futures_util::TryStreamExt;
     use rand::distributions::Alphanumeric;
     use rand::{thread_rng, Rng};
     use slog::{debug, o, Drain, Logger};
     use sodiumoxide::crypto::secretbox;
     use std::path::Path;
-    use tempfile::NamedTempFile;
-    use tokio::io::AsyncWriteExt;
     use tokio::net::{UnixListener, UnixStream};
     use trithemius::{client_connector::ClientConnector, keyring, ClientMessage, Identity};
 
@@ -331,10 +327,12 @@ mod tests {
                     let keyring = keyring::KeyRing::default();
                     let mut client_connector =
                         ClientConnector::new(&identity, &name, Some(log.new(o!())));
-                    client_connector.connect(stream, &keyring).await?;
+                    client_connector.connect(stream).await?;
+                    client_connector.send_identity().await?;
+                    client_connector.wait_for_peers_message(&keyring).await?;
                     return Ok((client_connector, identity));
                 }
-                Err(error) => std::thread::sleep(std::time::Duration::from_secs(1)),
+                Err(_) => std::thread::sleep(std::time::Duration::from_secs(1)),
             }
         }
     }
@@ -349,7 +347,7 @@ mod tests {
         let rand_string: String = thread_rng().sample_iter(&Alphanumeric).take(6).collect();
         let path: String = "/tmp/.socket_".to_owned() + &rand_string;
         // Make sure the file isn't there
-        std::fs::remove_file(path.clone());
+        let _ = std::fs::remove_file(path.clone());
         let session_key = secretbox::gen_key();
 
         Ok((log, path.into(), session_key))
@@ -357,7 +355,7 @@ mod tests {
 
     // Test teardown
     fn teardown(path: &str) {
-        std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -410,8 +408,8 @@ mod tests {
         });
 
         // Connect two clients to server
-        let (mut framed, identity) = connect_client(&path, "foo", &log).await?;
-        let (mut framed2, identity2) = connect_client(&path, "bar", &log).await?;
+        let (mut framed, _identity) = connect_client(&path, "foo", &log).await?;
+        let (mut framed2, _identity2) = connect_client(&path, "bar", &log).await?;
 
         // Wait for server
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -428,7 +426,10 @@ mod tests {
         // Wait for message
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::PeerJoined(Identity { name, public_key }) => assert_eq!("bar", name),
+            ServerMessage::PeerJoined(Identity {
+                name,
+                public_key: _,
+            }) => assert_eq!("bar", name),
             message => {
                 debug!(log, "Expected client message, got {:?}", message);
                 assert!(false);
@@ -469,7 +470,10 @@ mod tests {
         let (mut framed2, _) = connect_client(&path, "bar", &log).await?;
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::PeerJoined(Identity { name, public_key }) => assert_eq!("bar", name),
+            ServerMessage::PeerJoined(Identity {
+                name,
+                public_key: _,
+            }) => assert_eq!("bar", name),
             message => {
                 debug!(log, "Expected client message, got {:?}", message);
                 assert!(false);
@@ -478,7 +482,10 @@ mod tests {
         let (mut framed3, _) = connect_client(&path, "baz", &log).await?;
         let message = framed.next_message().await.unwrap()?;
         match message {
-            ServerMessage::PeerJoined(Identity { name, public_key }) => assert_eq!("baz", name),
+            ServerMessage::PeerJoined(Identity {
+                name,
+                public_key: _,
+            }) => assert_eq!("baz", name),
             message => {
                 debug!(log, "Expected client message, got {:?}", message);
                 assert!(false);
@@ -545,7 +552,7 @@ mod tests {
         });
 
         // Connect two clients to server
-        let (mut framed, _) = connect_client(&path, "foo", &log).await?;
+        let (_framed, _) = connect_client(&path, "foo", &log).await?;
         let (mut framed2, _) = connect_client(&path, "foo", &log).await?;
 
         // Wait for server

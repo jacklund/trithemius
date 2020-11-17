@@ -22,7 +22,7 @@ async fn connect_and_run(
 ) -> Result<()> {
     let mut client_connector = ClientConnector::new(&identity, &name, None);
     Ok(client_connector
-        .connect(TcpStream::connect(socket_addr).await?, &keyring)
+        .connect(TcpStream::connect(socket_addr).await?)
         .await?)
 }
 

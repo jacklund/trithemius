@@ -2,7 +2,7 @@ use crate::{
     keyring, ClientMessage, FramedConnection, Identity, Receiver, Result, Sender, ServerMessage,
 };
 use futures::StreamExt;
-use slog::{debug, error, info, o, Discard, Drain, Level, Logger};
+use slog::{debug, o, Discard, Logger};
 use sodiumoxide::crypto::{box_, secretbox};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -39,8 +39,8 @@ pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
 
 impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
     pub fn new(identity: &keyring::Identity, name: &str, log: Option<Logger>) -> Self {
-        let (mut event_sender, connector_receiver) = mpsc::unbounded_channel();
-        let (connector_sender, mut event_receiver) = mpsc::unbounded_channel();
+        let (event_sender, connector_receiver) = mpsc::unbounded_channel();
+        let (connector_sender, event_receiver) = mpsc::unbounded_channel();
         let mut log = match log {
             Some(logger) => logger,
             None => Logger::root(Discard, o!()),
@@ -60,10 +60,14 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         }
     }
 
-    pub async fn connect(&mut self, stream: T, keyring: &keyring::KeyRing) -> Result<()> {
+    pub async fn connect(&mut self, stream: T) -> Result<()> {
         self.connection = Some(FramedConnection::new(stream));
-        self.send_identity().await?;
-        // Next messages should be Peers, followed by a ChatInvite
+        // self.send_identity().await?;
+
+        Ok(())
+    }
+
+    pub async fn wait_for_peers_message(&mut self, keyring: &keyring::KeyRing) -> Result<()> {
         loop {
             debug!(self.log, "Waiting for Peers message...");
             match self.next_message().await {
@@ -338,52 +342,107 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::SinkExt;
     use rand::distributions::Alphanumeric;
     use rand::{thread_rng, Rng};
+    use slog::{debug, o, Drain, Logger};
     use std::path::Path;
     use tokio::net::{UnixListener, UnixStream};
     use tokio_serde::formats::SymmetricalMessagePack;
 
+    fn get_logger() -> Logger {
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog_async::Async::new(drain).build().fuse();
+
+        slog::Logger::root(drain, o!())
+    }
+
     // Connect a client to a Unix socket
-    async fn connect<P: AsRef<Path>>(path: P, name: &str) -> Result<ClientConnector<UnixStream>> {
+    async fn connect<P: AsRef<Path>>(
+        path: P,
+        name: &str,
+        log: Logger,
+    ) -> Result<ClientConnector<UnixStream>> {
         loop {
+            debug!(log, "Connecting to unix path");
             match UnixStream::connect(&path).await {
                 Ok(stream) => {
-                    let keyring = keyring::KeyRing::default();
                     let mut client_connector =
-                        ClientConnector::new(&keyring::Identity::new(name), name, None);
-                    client_connector.connect(stream, &keyring).await?;
+                        ClientConnector::new(&keyring::Identity::new(name), name, Some(log));
+                    client_connector.connect(stream).await?;
                     return Ok(client_connector);
                 }
-                Err(error) => std::thread::sleep(std::time::Duration::from_secs(1)),
+                Err(error) => {
+                    debug!(log, "UnixStream::connect got error: {:?}", error);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
             }
         }
     }
 
-    async fn server_loop(path: String, sender: Sender<ServerMessage>) -> Result<()> {
+    async fn server_loop(
+        path: String,
+        sender: Sender<ServerMessage>,
+        mut receiver: Receiver<ServerMessage>,
+        log: Logger,
+    ) -> Result<()> {
+        debug!(log, "Binding to {:?}", path);
         let listener = UnixListener::bind(path)?;
+        debug!(log, "Calling accept");
         let (stream, _) = listener.accept().await?;
         let mut framed = tokio_serde::SymmetricallyFramed::new(
             tokio_util::codec::Framed::new(stream, tokio_util::codec::BytesCodec::new()),
             SymmetricalMessagePack::<ServerMessage>::default(),
         );
         loop {
-            match framed.next().await {
-                Some(msg) => sender.send(msg?),
-                None => return Ok(()),
-            };
+            select! {
+                message_opt =  framed.next() => match message_opt {
+                    Some(msg) => sender.send(msg?)?,
+                    None => return Ok(()),
+                },
+                message_opt = receiver.recv() => match message_opt {
+                    Some(msg) => framed.send(msg).await?,
+                    None => return Ok(()),
+                }
+            }
         }
+
+        Ok(())
     }
 
-    // #[tokio::test]
-    async fn something() -> Result<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connector_generates_key_with_no_peers() -> Result<()> {
+        let log = get_logger();
         let rand_string: String = thread_rng().sample_iter(&Alphanumeric).take(6).collect();
         let path: String = "/tmp/.socket_".to_owned() + &rand_string;
         // Make sure the file isn't there
-        std::fs::remove_file(path.clone());
-        let (mut sender, receiver) = mpsc::unbounded_channel();
-        let client_connector = connect(path.clone(), "foo").await?;
-        tokio::task::spawn(server_loop(path, sender));
+        let _ = std::fs::remove_file(path.clone());
+        let (server_sender, mut client_receiver) = mpsc::unbounded_channel();
+        let (client_sender, server_receiver) = mpsc::unbounded_channel();
+        tokio::task::spawn(server_loop(
+            path.clone(),
+            server_sender,
+            server_receiver,
+            log.new(o!(())),
+        ));
+
+        // Wait for server
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
+        client_connector.send_identity().await?;
+        client_receiver.recv().await; // Identity
+
+        // Send empty peers message
+        client_sender.send(ServerMessage::Peers(vec![]))?;
+
+        // Receive peers message
+        let keyring = keyring::KeyRing::default();
+        client_connector.wait_for_peers_message(&keyring).await?;
+
+        assert!(client_connector.server_key.is_some());
+
         Ok(())
     }
 }
