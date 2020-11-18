@@ -10,6 +10,18 @@ use tokio::select;
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Peer {
+    identity: Identity,
+    contact: Option<keyring::Contact>,
+}
+
+impl Peer {
+    fn new(identity: Identity, contact: Option<keyring::Contact>) -> Self {
+        Self { identity, contact }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum Event {
     Connected,
     ChatMessage {
@@ -17,6 +29,7 @@ pub enum Event {
         recipients: Option<Vec<String>>,
         message: String,
     },
+    PeerList(Vec<Peer>),
     ContactFound {
         contact: keyring::Contact,
         chat_name: Option<String>,
@@ -27,7 +40,7 @@ pub enum Event {
 pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     identity: keyring::Identity,
     name: String,
-    peers: HashMap<String, (box_::PublicKey, Option<keyring::Contact>)>,
+    peers: HashMap<String, Peer>,
     event_sender: Sender<Event>,
     connector_receiver: Receiver<Event>,
     connector_sender: Sender<Event>,
@@ -37,6 +50,8 @@ pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     log: Logger,
 }
 
+// TODO: What do I do with event_receiver? I can't make it part of self, otherwise I'll get a
+// sharing error in handle_events. Don't really want to pass it into handle_events either.
 impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
     pub fn new(identity: &keyring::Identity, name: &str, log: Option<Logger>) -> Self {
         let (event_sender, connector_receiver) = mpsc::unbounded_channel();
@@ -83,6 +98,10 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                             self.add_peer(keyring, &peer)?;
                         }
                     }
+                    let peer_list =
+                        Event::PeerList(self.peers.values().map(|p| p.clone()).collect());
+                    debug!(self.log, "Sending PeerList event: {:?}", peer_list);
+                    self.event_sender.send(peer_list)?;
                     break;
                 }
                 _ => {
@@ -118,12 +137,12 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                         Some(sender) => {
                             debug!(self.log, "Looking up sender {}", sender);
                             match self.peers.get(&sender) {
-                                Some((key, Some(contact))) => {
-                                    debug!(self.log, "Sender is {:?}", contact);
+                                Some(peer) => {
+                                    debug!(self.log, "Sender is {:?}", peer.contact);
                                     match box_::open(
                                         &message,
                                         &box_::Nonce::from_slice(&nonce).unwrap(),
-                                        &key,
+                                        &peer.identity.public_key,
                                         &self.identity.secret_key,
                                     ) {
                                         Ok(decrypted) => {
@@ -177,11 +196,11 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
     }
 
     pub async fn recv_event(&mut self) -> Option<Event> {
-        self.event_receiver.recv().await
+        self.connector_receiver.recv().await
     }
 
-    pub async fn send_event(&mut self, event: Event) -> Result<()> {
-        Ok(self.event_sender.send(event)?)
+    pub fn send_event(&mut self, event: Event) -> Result<()> {
+        Ok(self.connector_sender.send(event)?)
     }
 
     pub async fn send_identity(&mut self) -> Result<()> {
@@ -246,7 +265,6 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                     match message_opt {
                         Some(result) => self.handle_network_message(
                             keyring,
-                            &mut event_sender,
                             result?
                         ).await?,
                         None => break,
@@ -271,21 +289,14 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         let contact = keyring
             .find_contact(&identity.public_key)
             .map(|c| c.clone());
-        if let Some(ref contact) = contact {
-            self.event_sender.send(Event::ContactFound {
-                contact: contact.clone(),
-                chat_name: None,
-            })?;
-        }
         self.peers
-            .insert(identity.name.clone(), (identity.public_key, contact));
+            .insert(identity.name.clone(), Peer::new(identity.clone(), contact));
         Ok(())
     }
 
     async fn handle_network_message(
         &mut self,
         keyring: &keyring::KeyRing,
-        event_sender: &mut Sender<Event>,
         message: ServerMessage,
     ) -> Result<()> {
         match message {
@@ -411,8 +422,14 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn connector_generates_key_with_no_peers() -> Result<()> {
+    fn setup() -> Result<
+        ((
+            Logger,
+            String,
+            Sender<ServerMessage>,
+            Receiver<ServerMessage>,
+        )),
+    > {
         let log = get_logger();
         let rand_string: String = thread_rng().sample_iter(&Alphanumeric).take(6).collect();
         let path: String = "/tmp/.socket_".to_owned() + &rand_string;
@@ -430,6 +447,18 @@ mod tests {
         // Wait for server
         std::thread::sleep(std::time::Duration::from_secs(1));
 
+        Ok((log, path, client_sender, client_receiver))
+    }
+
+    fn new_identity(name: &str) -> Identity {
+        let (public_key, _) = box_::gen_keypair();
+        Identity::new(name, &public_key)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connector_generates_key_with_no_peers() -> Result<()> {
+        let (log, path, client_sender, mut client_receiver) = setup()?;
+
         let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
         client_connector.send_identity().await?;
         client_receiver.recv().await; // Identity
@@ -442,6 +471,40 @@ mod tests {
         client_connector.wait_for_peers_message(&keyring).await?;
 
         assert!(client_connector.server_key.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connector_generates_peerlist_event_with_peers_present() -> Result<()> {
+        let (log, path, client_sender, mut client_receiver) = setup()?;
+
+        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
+        client_connector.send_identity().await?;
+        client_receiver.recv().await; // Identity
+
+        // Send empty peers message
+        let bar = new_identity("bar");
+        let baz = new_identity("baz");
+        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
+
+        // Receive peers message
+        let keyring = keyring::KeyRing::default();
+        client_connector.wait_for_peers_message(&keyring).await?;
+
+        debug!(log, "Waiting for event");
+        match client_connector.recv_event().await {
+            Some(Event::PeerList(peer_list)) => {
+                assert_eq!(2, peer_list.len());
+                let identity_list = peer_list
+                    .iter()
+                    .map(|p| p.identity.clone())
+                    .collect::<Vec<Identity>>();
+                assert!(identity_list.contains(&bar));
+                assert!(identity_list.contains(&baz));
+            }
+            _ => assert!(false),
+        };
 
         Ok(())
     }

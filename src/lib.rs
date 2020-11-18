@@ -22,6 +22,15 @@ pub struct Identity {
     pub public_key: box_::PublicKey,
 }
 
+impl Identity {
+    pub fn new(name: &str, public_key: &box_::PublicKey) -> Self {
+        Self {
+            name: name.into(),
+            public_key: public_key.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ServerMessage {
     Identity(Identity),
