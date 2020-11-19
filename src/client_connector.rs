@@ -44,14 +44,12 @@ pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     event_sender: Sender<Event>,
     connector_receiver: Receiver<Event>,
     connector_sender: Sender<Event>,
-    event_receiver: Receiver<Event>,
+    event_receiver: Option<Receiver<Event>>,
     pub connection: Option<FramedConnection<T>>,
     server_key: Option<secretbox::Key>,
     log: Logger,
 }
 
-// TODO: What do I do with event_receiver? I can't make it part of self, otherwise I'll get a
-// sharing error in handle_events. Don't really want to pass it into handle_events either.
 impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
     pub fn new(identity: &keyring::Identity, name: &str, log: Option<Logger>) -> Self {
         let (event_sender, connector_receiver) = mpsc::unbounded_channel();
@@ -68,7 +66,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             event_sender,
             connector_receiver,
             connector_sender,
-            event_receiver,
+            event_receiver: Some(event_receiver),
             connection: None,
             server_key: None,
             log,
@@ -251,12 +249,8 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         }
     }
 
-    pub async fn handle_events(
-        mut self,
-        keyring: &keyring::KeyRing,
-        mut event_sender: Sender<Event>,
-        mut event_receiver: Receiver<Event>,
-    ) -> Result<()> {
+    pub async fn handle_events(mut self, keyring: &keyring::KeyRing) -> Result<()> {
+        let mut event_receiver = self.event_receiver.take().unwrap();
         // Event loop
         loop {
             select! {
