@@ -40,6 +40,9 @@ pub enum ServerMessage {
     },
     PeerJoined(Identity),
     PeerDisconnected(String),
+    // ClientMessage is encrypted with the server key,
+    // unless it's wrapping a ChatInvite, in which case
+    // it's encrypted with the recipient's public key
     ClientMessage {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
@@ -48,6 +51,15 @@ pub enum ServerMessage {
     },
     ListUsers,
     ErrorMessage(String),
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub enum ClientMessage {
+    ChatInvite {
+        name: Option<String>,
+        key: secretbox::Key,
+    },
+    ChatMessage(String),
 }
 
 impl ServerMessage {
@@ -91,7 +103,6 @@ impl ServerMessage {
 
     pub fn new_chat_invite(
         name: Option<String>,
-        participants: Option<Vec<String>>,
         public_key: &box_::PublicKey,
         secret_key: &box_::SecretKey,
         recipients: Option<Vec<String>>,
@@ -101,7 +112,6 @@ impl ServerMessage {
         let encrypted = box_::seal(
             &rmp_serde::to_vec(&ClientMessage::ChatInvite {
                 name,
-                participants,
                 key: chat_key.clone(),
             })?,
             &nonce,
@@ -135,16 +145,6 @@ impl ServerMessage {
             _ => Err("Not a ClientMessage")?,
         }
     }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub enum ClientMessage {
-    ChatInvite {
-        name: Option<String>,
-        participants: Option<Vec<String>>,
-        key: secretbox::Key,
-    },
-    ChatMessage(String),
 }
 
 pub struct FramedConnection<T: AsyncRead + AsyncWrite + std::marker::Unpin> {

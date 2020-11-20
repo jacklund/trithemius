@@ -168,18 +168,17 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                     );
                     if let Some(client_message) = client_message_opt {
                         match client_message {
-                            ClientMessage::ChatInvite {
-                                name,
-                                participants: _,
-                                key,
-                            } => match name {
+                            ClientMessage::ChatInvite { name, key } => match name {
                                 None => {
                                     match self.server_key {
                                         Some(_) => {
                                             // TODO: What do we do if we already have a key?
                                             panic!("We already have a key");
                                         }
-                                        None => self.server_key = Some(key),
+                                        None => {
+                                            self.server_key = Some(key);
+                                            break;
+                                        }
                                     }
                                 }
                                 _ => unimplemented!(),
@@ -191,6 +190,8 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 _ => unimplemented!(),
             }
         }
+
+        Ok(())
     }
 
     pub async fn recv_event(&mut self) -> Option<Event> {
@@ -223,7 +224,6 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 Ok(self
                     .send_message(ServerMessage::new_chat_invite(
                         Some(self.name.clone()),
-                        None,
                         public_key,
                         &self.identity.secret_key,
                         Some(vec![recipient.into()]),
@@ -444,9 +444,9 @@ mod tests {
         Ok((log, path, client_sender, client_receiver))
     }
 
-    fn new_identity(name: &str) -> Identity {
-        let (public_key, _) = box_::gen_keypair();
-        Identity::new(name, &public_key)
+    fn new_identity(name: &str) -> (Identity, box_::SecretKey) {
+        let (public_key, secret_key) = box_::gen_keypair();
+        (Identity::new(name, &public_key), secret_key)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -477,9 +477,9 @@ mod tests {
         client_connector.send_identity().await?;
         client_receiver.recv().await; // Identity
 
-        // Send empty peers message
-        let bar = new_identity("bar");
-        let baz = new_identity("baz");
+        // Send peers message
+        let (bar, _) = new_identity("bar");
+        let (baz, _) = new_identity("baz");
         client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
 
         // Receive peers message
@@ -499,6 +499,99 @@ mod tests {
             }
             _ => assert!(false),
         };
+
+        // Connector shouldn't have a server key (yet)
+        assert!(client_connector.server_key.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connector_uses_server_key_from_chat_invite() -> Result<()> {
+        let (log, path, client_sender, mut client_receiver) = setup()?;
+
+        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
+        client_connector.send_identity().await?;
+        client_receiver.recv().await; // Identity
+
+        // Send peers message
+        let (bar, secret_key) = new_identity("bar");
+        let (baz, _) = new_identity("baz");
+        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
+
+        // Receive peers message
+        let keyring = keyring::KeyRing::default();
+        client_connector.wait_for_peers_message(&keyring).await?;
+        let _peer_list_event = client_connector.recv_event().await;
+
+        let server_key = secretbox::gen_key();
+        let public_key = &client_connector.identity.public_key;
+        let mut chat_invite = ServerMessage::new_chat_invite(
+            None,
+            public_key,
+            &secret_key,
+            Some(vec!["foo".into()]),
+            &server_key,
+        )?;
+        if let ServerMessage::ClientMessage {
+            ref mut sender,
+            ref recipients,
+            ref nonce,
+            ref message,
+        } = chat_invite
+        {
+            *sender = Some("bar".into());
+        };
+        client_sender.send(chat_invite)?;
+        client_connector.wait_for_server_key().await?;
+
+        assert!(client_connector.server_key.is_some());
+        assert_eq!(server_key, client_connector.server_key.unwrap());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connector_handles_same_server_key_sent_multiple_times() -> Result<()> {
+        let (log, path, client_sender, mut client_receiver) = setup()?;
+
+        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
+        client_connector.send_identity().await?;
+        client_receiver.recv().await; // Identity
+
+        // Send peers message
+        let (bar, bar_secret_key) = new_identity("bar");
+        let (baz, baz_secret_key) = new_identity("baz");
+        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
+
+        // Receive peers message
+        let keyring = keyring::KeyRing::default();
+        client_connector.wait_for_peers_message(&keyring).await?;
+        let _peer_list_event = client_connector.recv_event().await;
+
+        let server_key = secretbox::gen_key();
+        let public_key = &client_connector.identity.public_key;
+        let mut chat_invite = ServerMessage::new_chat_invite(
+            None,
+            public_key,
+            &bar_secret_key,
+            Some(vec!["foo".into()]),
+            &server_key,
+        )?;
+        if let ServerMessage::ClientMessage {
+            ref mut sender,
+            ref recipients,
+            ref nonce,
+            ref message,
+        } = chat_invite
+        {
+            *sender = Some("bar".into());
+        };
+        client_sender.send(chat_invite)?;
+        client_connector.wait_for_server_key().await?;
+
+        assert!(client_connector.server_key.is_some());
+        assert_eq!(server_key, client_connector.server_key.unwrap());
 
         Ok(())
     }
