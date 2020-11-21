@@ -127,9 +127,9 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             debug!(self.log, "Got {:?}", message);
             match message {
                 // Handle the ChatInvite
-                Some(Ok(ServerMessage::ClientMessage {
+                Some(Ok(ServerMessage::ChatInvite {
                     sender,
-                    recipients: _,
+                    recipient: _,
                     message,
                     nonce,
                 })) => {
@@ -143,7 +143,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                                     debug!(self.log, "Sender is {:?}", peer.contact);
                                     match box_::open(
                                         &message,
-                                        &box_::Nonce::from_slice(&nonce).unwrap(),
+                                        &nonce,
                                         &peer.identity.public_key,
                                         &self.identity.secret_key,
                                     ) {
@@ -220,18 +220,19 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         &mut self,
         public_key: &box_::PublicKey,
         recipient: &str,
+        chat_name: Option<String>,
     ) -> Result<()> {
         debug!(self.log, "Sending chat invite");
-        match self.server_key() {
-            Some(server_key) => {
-                let server_key = server_key.clone();
+        match self.chat_keys.get(&chat_name) {
+            Some(chat_key) => {
+                let chat_key = chat_key.clone();
                 Ok(self
                     .send_message(ServerMessage::new_chat_invite(
-                        Some(self.name.clone()),
+                        None,
                         public_key,
                         &self.identity.secret_key,
-                        Some(vec![recipient.into()]),
-                        &server_key,
+                        recipient,
+                        &chat_key,
                     )?)
                     .await?)
             }
@@ -530,18 +531,13 @@ mod tests {
 
         let server_key = secretbox::gen_key();
         let public_key = &client_connector.identity.public_key;
-        let mut chat_invite = ServerMessage::new_chat_invite(
-            None,
-            public_key,
-            &secret_key,
-            Some(vec!["foo".into()]),
-            &server_key,
-        )?;
-        if let ServerMessage::ClientMessage {
+        let mut chat_invite =
+            ServerMessage::new_chat_invite(None, public_key, &secret_key, "foo", &server_key)?;
+        if let ServerMessage::ChatInvite {
             ref mut sender,
-            ref recipients,
-            ref nonce,
+            ref recipient,
             ref message,
+            ref nonce,
         } = chat_invite
         {
             *sender = Some("bar".into());
@@ -575,18 +571,13 @@ mod tests {
 
         let server_key = secretbox::gen_key();
         let public_key = &client_connector.identity.public_key;
-        let mut chat_invite = ServerMessage::new_chat_invite(
-            None,
-            public_key,
-            &bar_secret_key,
-            Some(vec!["foo".into()]),
-            &server_key,
-        )?;
-        if let ServerMessage::ClientMessage {
+        let mut chat_invite =
+            ServerMessage::new_chat_invite(None, public_key, &bar_secret_key, "foo", &server_key)?;
+        if let ServerMessage::ChatInvite {
             ref mut sender,
-            ref recipients,
-            ref nonce,
+            ref recipient,
             ref message,
+            ref nonce,
         } = chat_invite
         {
             *sender = Some("bar".into());

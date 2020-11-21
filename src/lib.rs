@@ -40,9 +40,14 @@ pub enum ServerMessage {
     },
     PeerJoined(Identity),
     PeerDisconnected(String),
-    // ClientMessage is encrypted with the server key,
-    // unless it's wrapping a ChatInvite, in which case
-    // it's encrypted with the recipient's public key
+    // ChatInvite is encrypted with recipients public key
+    ChatInvite {
+        sender: Option<String>,
+        recipient: String,
+        message: Vec<u8>,
+        nonce: box_::Nonce,
+    },
+    // ClientMessage is encrypted with chat key
     ClientMessage {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
@@ -105,7 +110,7 @@ impl ServerMessage {
         name: Option<String>,
         public_key: &box_::PublicKey,
         secret_key: &box_::SecretKey,
-        recipients: Option<Vec<String>>,
+        recipient: &str,
         chat_key: &secretbox::Key,
     ) -> Result<Self> {
         let nonce = box_::gen_nonce();
@@ -118,7 +123,12 @@ impl ServerMessage {
             public_key,
             secret_key,
         );
-        Self::new_client_message(recipients, nonce.as_ref(), &encrypted)
+        Ok(Self::ChatInvite {
+            sender: None,
+            recipient: recipient.into(),
+            message: encrypted,
+            nonce: nonce,
+        })
     }
 
     pub fn get_client_message(
