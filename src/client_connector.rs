@@ -46,7 +46,7 @@ pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     connector_sender: Sender<Event>,
     event_receiver: Option<Receiver<Event>>,
     pub connection: Option<FramedConnection<T>>,
-    server_key: Option<secretbox::Key>,
+    chat_keys: HashMap<Option<String>, secretbox::Key>,
     log: Logger,
 }
 
@@ -68,7 +68,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             connector_sender,
             event_receiver: Some(event_receiver),
             connection: None,
-            server_key: None,
+            chat_keys: HashMap::new(),
             log,
         }
     }
@@ -89,7 +89,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                     debug!(self.log, "Got Peers message, peers = {:?}", peers);
                     if peers.is_empty() {
                         debug!(self.log, "Generating server key");
-                        self.server_key = Some(secretbox::gen_key());
+                        self.chat_keys.insert(None, secretbox::gen_key());
                     } else {
                         for peer in peers {
                             debug!(self.log, "Adding peer {}", peer.name);
@@ -112,8 +112,12 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         Ok(())
     }
 
+    fn server_key(&self) -> Option<&secretbox::Key> {
+        self.chat_keys.get(&None)
+    }
+
     pub async fn wait_for_server_key(&mut self) -> Result<()> {
-        if self.server_key.is_some() {
+        if self.server_key().is_some() {
             Err("Already have server key")?;
         }
 
@@ -170,13 +174,13 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                         match client_message {
                             ClientMessage::ChatInvite { name, key } => match name {
                                 None => {
-                                    match self.server_key {
+                                    match self.server_key() {
                                         Some(_) => {
                                             // TODO: What do we do if we already have a key?
                                             panic!("We already have a key");
                                         }
                                         None => {
-                                            self.server_key = Some(key);
+                                            self.chat_keys.insert(None, key);
                                             break;
                                         }
                                     }
@@ -218,8 +222,8 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         recipient: &str,
     ) -> Result<()> {
         debug!(self.log, "Sending chat invite");
-        match self.server_key {
-            Some(ref server_key) => {
+        match self.server_key() {
+            Some(server_key) => {
                 let server_key = server_key.clone();
                 Ok(self
                     .send_message(ServerMessage::new_chat_invite(
@@ -300,7 +304,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 recipients: _,
                 message,
                 nonce,
-            } => match self.server_key {
+            } => match self.server_key() {
                 Some(ref server_key) => {
                     let nonce = match secretbox::Nonce::from_slice(&nonce) {
                         Some(nonce) => nonce,
@@ -464,7 +468,7 @@ mod tests {
         let keyring = keyring::KeyRing::default();
         client_connector.wait_for_peers_message(&keyring).await?;
 
-        assert!(client_connector.server_key.is_some());
+        assert!(client_connector.server_key().is_some());
 
         Ok(())
     }
@@ -501,7 +505,7 @@ mod tests {
         };
 
         // Connector shouldn't have a server key (yet)
-        assert!(client_connector.server_key.is_none());
+        assert!(client_connector.server_key().is_none());
 
         Ok(())
     }
@@ -545,8 +549,8 @@ mod tests {
         client_sender.send(chat_invite)?;
         client_connector.wait_for_server_key().await?;
 
-        assert!(client_connector.server_key.is_some());
-        assert_eq!(server_key, client_connector.server_key.unwrap());
+        assert!(client_connector.server_key().is_some());
+        assert_eq!(server_key, *client_connector.server_key().unwrap());
 
         Ok(())
     }
@@ -590,8 +594,8 @@ mod tests {
         client_sender.send(chat_invite)?;
         client_connector.wait_for_server_key().await?;
 
-        assert!(client_connector.server_key.is_some());
-        assert_eq!(server_key, client_connector.server_key.unwrap());
+        assert!(client_connector.server_key().is_some());
+        assert_eq!(server_key, *client_connector.server_key().unwrap());
 
         Ok(())
     }
