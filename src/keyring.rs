@@ -19,6 +19,15 @@ pub struct Contact {
     public_keys: Vec<box_::PublicKey>,
 }
 
+impl Contact {
+    pub fn new(name: &str, public_keys: &[box_::PublicKey]) -> Self {
+        Contact {
+            name: name.into(),
+            public_keys: public_keys.to_vec(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Key {
     name: String,

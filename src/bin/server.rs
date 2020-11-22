@@ -386,6 +386,8 @@ mod tests {
         assert!(connector
             .send_message(ServerMessage::new_chat_message(
                 &session_key,
+                &session_key,
+                None,
                 Some(vec!["foo".into()]),
                 "Hello",
             )?)
@@ -418,6 +420,8 @@ mod tests {
         framed2
             .send_message(ServerMessage::new_chat_message(
                 &session_key,
+                &session_key,
+                None,
                 Some(vec!["foo".into()]),
                 "Hello",
             )?)
@@ -439,7 +443,15 @@ mod tests {
         match message {
             client_message @ ServerMessage::ClientMessage { .. } => {
                 match ServerMessage::get_client_message(&session_key, &client_message)? {
-                    ClientMessage::ChatMessage(message) => assert_eq!("Hello", message),
+                    ClientMessage::ChatMessage {
+                        chat_name: _,
+                        message,
+                        nonce,
+                    } => {
+                        let decrypted =
+                            ClientMessage::decrypt_chat_message(&session_key, &message, &nonce)?;
+                        assert_eq!("Hello", decrypted);
+                    }
                     _ => assert!(false),
                 };
             }
@@ -496,6 +508,8 @@ mod tests {
         framed2
             .send_message(ServerMessage::new_chat_message(
                 &session_key,
+                &session_key,
+                None,
                 None,
                 "Hello",
             )?)
@@ -505,7 +519,15 @@ mod tests {
         match message {
             client_message @ ServerMessage::ClientMessage { .. } => {
                 match ServerMessage::get_client_message(&session_key, &client_message)? {
-                    ClientMessage::ChatMessage(message) => assert_eq!("Hello", message),
+                    ClientMessage::ChatMessage {
+                        chat_name: _,
+                        message,
+                        nonce,
+                    } => {
+                        let decrypted =
+                            ClientMessage::decrypt_chat_message(&session_key, &message, &nonce)?;
+                        assert_eq!("Hello", decrypted);
+                    }
                     message => {
                         debug!(log, "Expected chat message, got {:?}", message);
                         assert!(false);
@@ -522,7 +544,15 @@ mod tests {
         match message {
             client_message @ ServerMessage::ClientMessage { .. } => {
                 match ServerMessage::get_client_message(&session_key, &client_message)? {
-                    ClientMessage::ChatMessage(message) => assert_eq!("Hello", message),
+                    ClientMessage::ChatMessage {
+                        chat_name: _,
+                        message,
+                        nonce,
+                    } => {
+                        let decrypted =
+                            ClientMessage::decrypt_chat_message(&session_key, &message, &nonce)?;
+                        assert_eq!("Hello", decrypted);
+                    }
                     message => {
                         debug!(log, "Expected chat message, got {:?}", message);
                         assert!(false);
@@ -562,6 +592,8 @@ mod tests {
         assert!(framed2
             .send_message(ServerMessage::new_chat_message(
                 &session_key,
+                &session_key,
+                None,
                 Some(vec!["foo".into()]),
                 "Hello",
             )?)

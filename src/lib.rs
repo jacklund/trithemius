@@ -52,9 +52,8 @@ pub enum ServerMessage {
         sender: Option<String>,
         recipients: Option<Vec<String>>,
         message: Vec<u8>,
-        nonce: Vec<u8>,
+        nonce: secretbox::Nonce,
     },
-    ListUsers,
     ErrorMessage(String),
 }
 
@@ -64,7 +63,11 @@ pub enum ClientMessage {
         name: Option<String>,
         key: secretbox::Key,
     },
-    ChatMessage(String),
+    ChatMessage {
+        chat_name: Option<String>,
+        message: Vec<u8>,
+        nonce: secretbox::Nonce,
+    },
 }
 
 impl ServerMessage {
@@ -81,29 +84,37 @@ impl ServerMessage {
 
     pub fn new_client_message(
         recipients: Option<Vec<String>>,
-        nonce: &[u8],
-        encrypted: &[u8],
+        nonce: secretbox::Nonce,
+        encrypted: Vec<u8>,
     ) -> Result<Self> {
         Ok(Self::ClientMessage {
             sender: None,
             recipients,
-            message: encrypted.to_vec(),
-            nonce: nonce.to_vec(),
+            message: encrypted,
+            nonce,
         })
     }
 
     pub fn new_chat_message(
-        key: &secretbox::Key,
+        server_key: &secretbox::Key,
+        chat_key: &secretbox::Key,
+        chat_name: Option<String>,
         recipients: Option<Vec<String>>,
         message: &str,
     ) -> Result<Self> {
-        let nonce = secretbox::gen_nonce();
-        let encrypted = secretbox::seal(
-            &rmp_serde::to_vec(&ClientMessage::ChatMessage(message.into()))?,
-            &nonce,
-            key,
+        let chat_nonce = secretbox::gen_nonce();
+        let encrypted = secretbox::seal(message.as_bytes(), &chat_nonce, chat_key);
+        let server_nonce = secretbox::gen_nonce();
+        let encrypted_chat_message = secretbox::seal(
+            &rmp_serde::to_vec(&ClientMessage::ChatMessage {
+                chat_name: chat_name.into(),
+                message: encrypted,
+                nonce: chat_nonce,
+            })?,
+            &server_nonce,
+            server_key,
         );
-        Self::new_client_message(recipients, nonce.as_ref(), &encrypted)
+        Self::new_client_message(recipients, server_nonce, encrypted_chat_message)
     }
 
     pub fn new_chat_invite(
@@ -142,10 +153,6 @@ impl ServerMessage {
                 message,
                 nonce,
             } => {
-                let nonce = match secretbox::Nonce::from_slice(&nonce) {
-                    Some(nonce) => nonce,
-                    None => Err("Error converting nonce from bytes in message")?,
-                };
                 let decrypted = match secretbox::open(&message, &nonce, key) {
                     Ok(decrypted) => decrypted,
                     Err(_) => Err("Error decrypting message")?,
@@ -153,6 +160,19 @@ impl ServerMessage {
                 Ok(rmp_serde::from_read_ref(&decrypted)?)
             }
             _ => Err("Not a ClientMessage")?,
+        }
+    }
+}
+
+impl ClientMessage {
+    pub fn decrypt_chat_message(
+        key: &secretbox::Key,
+        message: &[u8],
+        nonce: &secretbox::Nonce,
+    ) -> Result<String> {
+        match secretbox::open(message, nonce, key) {
+            Ok(decrypted) => Ok(std::str::from_utf8(&decrypted)?.into()),
+            Err(_) => Err("Error decrypting message")?,
         }
     }
 }
