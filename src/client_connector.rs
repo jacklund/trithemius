@@ -2,7 +2,7 @@ use crate::{
     keyring, ClientMessage, FramedConnection, Identity, Receiver, Result, Sender, ServerMessage,
 };
 use futures::StreamExt;
-use slog::{debug, o, Discard, Logger};
+use slog::{debug, error, o, Discard, Logger};
 use sodiumoxide::crypto::{box_, secretbox};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -116,6 +116,41 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         self.chat_keys.get(&None)
     }
 
+    async fn decrypt_chat_invite(
+        &self,
+        sender: &str,
+        message: &[u8],
+        nonce: &box_::Nonce,
+    ) -> Option<ClientMessage> {
+        debug!(self.log, "Looking up sender {}", sender);
+        match self.peers.get(sender) {
+            Some(peer) => {
+                debug!(self.log, "Sender is {:?}", peer.contact);
+                match box_::open(
+                    &message,
+                    nonce,
+                    &peer.identity.public_key,
+                    &self.identity.secret_key,
+                ) {
+                    Ok(decrypted) => match rmp_serde::from_read_ref(&decrypted) {
+                        Ok(message) => Some(message),
+                        Err(error) => {
+                            error!(self.log, "Error decoding message: {}", error);
+                            None
+                        }
+                    },
+                    Err(_) => {
+                        error!(self.log, "Error decrypting message");
+                        None
+                    }
+                }
+            }
+            // If we can't find the sender in our peers list, or if they're not in our contacts,
+            // we can't authenticate the message
+            _ => None,
+        }
+    }
+
     pub async fn wait_for_server_key(&mut self) -> Result<()> {
         if self.server_key().is_some() {
             Err("Already have server key")?;
@@ -136,34 +171,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                     // Try to decrypt the outer wrapper using my secret key
                     // TODO: Make this a function
                     let client_message_opt = match sender {
-                        Some(sender) => {
-                            debug!(self.log, "Looking up sender {}", sender);
-                            match self.peers.get(&sender) {
-                                Some(peer) => {
-                                    debug!(self.log, "Sender is {:?}", peer.contact);
-                                    match box_::open(
-                                        &message,
-                                        &nonce,
-                                        &peer.identity.public_key,
-                                        &self.identity.secret_key,
-                                    ) {
-                                        Ok(decrypted) => {
-                                            Some(rmp_serde::from_read_ref(&decrypted)?)
-                                        }
-                                        Err(_) => {
-                                            // TODO: Not sure what to do here. Log?
-                                            self.connector_sender.send(Event::Error(
-                                                "Error decrypting message".into(),
-                                            ))?;
-                                            None
-                                        }
-                                    }
-                                }
-                                // If we can't find the sender in our peers list, or if they're not in our contacts,
-                                // we can't authenticate the message
-                                _ => None,
-                            }
-                        }
+                        Some(sender) => self.decrypt_chat_invite(&sender, &message, &nonce).await,
                         None => None,
                     };
                     debug!(
