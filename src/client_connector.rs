@@ -485,6 +485,18 @@ mod tests {
         (Identity::new(name, &public_key), secret_key)
     }
 
+    async fn handle_message(
+        client_connector: &mut ClientConnector<UnixStream>,
+        keyring: &keyring::KeyRing,
+    ) -> Result<()> {
+        match client_connector.next_message().await {
+            Some(message) => Ok(client_connector
+                .handle_network_message(keyring, message?)
+                .await?),
+            None => Err("Client connector got None")?,
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn connector_generates_key_with_no_peers() -> Result<()> {
         let (log, path, client_sender, mut client_receiver) = setup()?;
@@ -498,14 +510,7 @@ mod tests {
 
         // Receive peers message
         let keyring = keyring::KeyRing::default();
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
 
         assert!(client_connector.server_key().is_some());
 
@@ -527,14 +532,7 @@ mod tests {
 
         // Receive peers message
         let keyring = keyring::KeyRing::default();
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
 
         debug!(log, "Waiting for event");
         match client_connector.recv_event().await {
@@ -572,14 +570,7 @@ mod tests {
         // Receive peers message
         let mut keyring = keyring::KeyRing::default();
         keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
         let _peer_list_event = client_connector.recv_event().await;
 
         // Send chat invite
@@ -599,14 +590,7 @@ mod tests {
         client_sender.send(chat_invite)?;
 
         // Handle the chat invite
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
 
         assert!(client_connector.server_key().is_some());
         assert_eq!(server_key, *client_connector.server_key().unwrap());
@@ -629,14 +613,7 @@ mod tests {
 
         // Receive peers message
         let keyring = keyring::KeyRing::default();
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
         let _peer_list_event = client_connector.recv_event().await;
 
         // Send chat invite
@@ -656,14 +633,7 @@ mod tests {
         client_sender.send(chat_invite)?;
 
         // Handle the chat invite
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
 
         assert!(client_connector.server_key().is_none());
 
@@ -687,14 +657,7 @@ mod tests {
         let mut keyring = keyring::KeyRing::default();
         keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
         keyring.add_contact(&keyring::Contact::new("barfoo", &vec![baz.public_key]));
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
         let _peer_list_event = client_connector.recv_event().await;
 
         let server_key = secretbox::gen_key();
@@ -713,14 +676,7 @@ mod tests {
         client_sender.send(chat_invite)?;
 
         // Handle the chat invite
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
 
         let public_key = &client_connector.identity.public_key;
         let mut chat_invite =
@@ -737,14 +693,7 @@ mod tests {
         client_sender.send(chat_invite)?;
 
         // Handle the chat invite
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
 
         assert!(client_connector.server_key().is_some());
         assert_eq!(server_key, *client_connector.server_key().unwrap());
@@ -768,14 +717,7 @@ mod tests {
         // Receive peers message
         let mut keyring = keyring::KeyRing::default();
         keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
         let _peer_list_event = client_connector.recv_event().await;
 
         let server_key = secretbox::gen_key();
@@ -794,14 +736,7 @@ mod tests {
         client_sender.send(chat_invite)?;
 
         // Handle the chat invite
-        match client_connector.next_message().await {
-            Some(message) => {
-                client_connector
-                    .handle_network_message(&keyring, message?)
-                    .await?
-            }
-            None => assert!(false),
-        };
+        handle_message(&mut client_connector, &keyring).await?;
 
         Ok(())
     }
