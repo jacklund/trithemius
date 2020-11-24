@@ -48,6 +48,7 @@ pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     pub connection: Option<FramedConnection<T>>,
     chat_keys: HashMap<Option<String>, secretbox::Key>,
     chat_list: Vec<String>,
+    chat_members: HashMap<String, Vec<String>>,
     log: Logger,
 }
 
@@ -71,6 +72,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             connection: None,
             chat_keys: HashMap::new(),
             chat_list: vec![],
+            chat_members: HashMap::new(),
             log,
         }
     }
@@ -212,6 +214,54 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         }
     }
 
+    pub async fn send_server_chat_message(
+        &mut self,
+        message: &str,
+        recipients: Option<Vec<String>>,
+    ) -> Result<()> {
+        self._send_chat_message(None, message, recipients).await
+    }
+
+    pub async fn send_chat_message(&mut self, chat_name: &str, message: &str) -> Result<()> {
+        let chat_members = match self.chat_members.get(chat_name) {
+            Some(chat_members) => chat_members.clone(),
+            None => Err(format!("Not member of chat {}", chat_name))?,
+        };
+        self._send_chat_message(Some(chat_name.to_string()), message, Some(chat_members))
+            .await
+    }
+
+    async fn _send_chat_message(
+        &mut self,
+        chat_name: Option<String>,
+        message: &str,
+        recipients: Option<Vec<String>>,
+    ) -> Result<()> {
+        let chat_key = match self.chat_keys.get(&chat_name) {
+            Some(chat_key) => chat_key.clone(),
+            None => match chat_name {
+                Some(ref chat_name) => Err(format!("No chat key found for {}", chat_name))?,
+                None => Err("Server key not found")?,
+            },
+        };
+
+        let server_key = match self.server_key() {
+            Some(server_key) => server_key.clone(),
+            None => Err("Server key not found")?,
+        };
+
+        self.send_message(ServerMessage::new_chat_message(
+            &server_key,
+            &chat_key,
+            chat_name,
+            recipients,
+            message,
+        )?)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn send_message(&mut self, message: ServerMessage) -> Result<()> {
         match &mut self.connection {
             Some(connection) => Ok(connection.send(message).await?),
@@ -274,12 +324,17 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
 
         // If we found a contact, inform the client
         if let Some(contact) = contact_opt.clone() {
-            self.event_sender.send(Event::ContactFound {
+            self.send_event_to_client(Event::ContactFound {
                 contact,
                 chat_name: None,
             })?;
         }
         Ok(contact_opt)
+    }
+
+    pub fn send_event_to_client(&mut self, event: Event) -> Result<()> {
+        debug!(self.log, "Sending event {:?} to client", event);
+        Ok(self.event_sender.send(event)?)
     }
 
     pub async fn handle_network_message(
@@ -319,9 +374,9 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                         self.add_peer(keyring, &peer)?;
                     }
                 }
-                let peer_list = Event::PeerList(self.peers.values().map(|p| p.clone()).collect());
-                debug!(self.log, "Sending PeerList event: {:?}", peer_list);
-                self.event_sender.send(peer_list)?;
+                self.send_event_to_client(Event::PeerList(
+                    self.peers.values().map(|p| p.clone()).collect(),
+                ))?;
                 Ok(())
             }
             ServerMessage::PeerJoined(identity) => {
@@ -567,11 +622,17 @@ mod tests {
         let (baz, _) = new_identity("baz");
         client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
 
-        // Receive peers message
+        // Receive ContactFound event
         let mut keyring = keyring::KeyRing::default();
         keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
         handle_message(&mut client_connector, &keyring).await?;
-        let _peer_list_event = client_connector.recv_event().await;
+        match client_connector.recv_event().await {
+            Some(Event::ContactFound { contact, chat_name }) => {
+                assert_eq!(contact, keyring::Contact::new("foobar", &[bar.public_key]));
+                assert_eq!(chat_name, None);
+            }
+            _ => assert!(false),
+        };
 
         // Send chat invite
         let server_key = secretbox::gen_key();
@@ -614,7 +675,6 @@ mod tests {
         // Receive peers message
         let keyring = keyring::KeyRing::default();
         handle_message(&mut client_connector, &keyring).await?;
-        let _peer_list_event = client_connector.recv_event().await;
 
         // Send chat invite
         let server_key = secretbox::gen_key();
@@ -718,7 +778,6 @@ mod tests {
         let mut keyring = keyring::KeyRing::default();
         keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
         handle_message(&mut client_connector, &keyring).await?;
-        let _peer_list_event = client_connector.recv_event().await;
 
         let server_key = secretbox::gen_key();
         let public_key = &client_connector.identity.public_key;
@@ -737,6 +796,22 @@ mod tests {
 
         // Handle the chat invite
         handle_message(&mut client_connector, &keyring).await?;
+
+        // Send chat message
+        client_connector
+            .send_server_chat_message("Hello!", Some(vec!["bar".into(), "baz".into()]))
+            .await?;
+
+        // Receive and decrypt chat message
+        let chat_message = client_receiver.recv().await.unwrap();
+        assert_eq!(
+            "Hello!",
+            ClientMessage::decrypt_chat_message(
+                &server_key,
+                &ServerMessage::get_client_message(&server_key, &chat_message)?
+            )?
+            .message
+        );
 
         Ok(())
     }

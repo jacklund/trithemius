@@ -449,18 +449,14 @@ mod tests {
         let message = framed.next_message().await.unwrap()?;
         match message {
             client_message @ ServerMessage::ClientMessage { .. } => {
-                match ServerMessage::get_client_message(&session_key, &client_message)? {
-                    ClientMessage::ChatMessage {
-                        chat_name: _,
-                        message,
-                        nonce,
-                    } => {
-                        let decrypted =
-                            ClientMessage::decrypt_chat_message(&session_key, &message, &nonce)?;
-                        assert_eq!("Hello", decrypted);
-                    }
-                    _ => assert!(false),
-                };
+                assert_eq!(
+                    "Hello",
+                    ClientMessage::decrypt_chat_message(
+                        &session_key,
+                        &ServerMessage::get_client_message(&session_key, &client_message)?
+                    )?
+                    .message
+                );
             }
             message => {
                 debug!(log, "Expected client message, got {:?}", message);
@@ -525,21 +521,14 @@ mod tests {
         let message = framed.next_message().await.unwrap()?;
         match message {
             client_message @ ServerMessage::ClientMessage { .. } => {
-                match ServerMessage::get_client_message(&session_key, &client_message)? {
-                    ClientMessage::ChatMessage {
-                        chat_name: _,
-                        message,
-                        nonce,
-                    } => {
-                        let decrypted =
-                            ClientMessage::decrypt_chat_message(&session_key, &message, &nonce)?;
-                        assert_eq!("Hello", decrypted);
-                    }
-                    message => {
-                        debug!(log, "Expected chat message, got {:?}", message);
-                        assert!(false);
-                    }
-                };
+                assert_eq!(
+                    "Hello",
+                    ClientMessage::decrypt_chat_message(
+                        &session_key,
+                        &ServerMessage::get_client_message(&session_key, &client_message)?
+                    )?
+                    .message
+                );
             }
             message => {
                 debug!(log, "Expected client message, got {:?}", message);
@@ -550,21 +539,14 @@ mod tests {
         let message = framed3.next_message().await.unwrap()?;
         match message {
             client_message @ ServerMessage::ClientMessage { .. } => {
-                match ServerMessage::get_client_message(&session_key, &client_message)? {
-                    ClientMessage::ChatMessage {
-                        chat_name: _,
-                        message,
-                        nonce,
-                    } => {
-                        let decrypted =
-                            ClientMessage::decrypt_chat_message(&session_key, &message, &nonce)?;
-                        assert_eq!("Hello", decrypted);
-                    }
-                    message => {
-                        debug!(log, "Expected chat message, got {:?}", message);
-                        assert!(false);
-                    }
-                };
+                assert_eq!(
+                    "Hello",
+                    ClientMessage::decrypt_chat_message(
+                        &session_key,
+                        &ServerMessage::get_client_message(&session_key, &client_message)?
+                    )?
+                    .message
+                );
             }
             message => {
                 debug!(log, "Expected client message, got {:?}", message);

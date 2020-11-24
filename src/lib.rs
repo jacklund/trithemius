@@ -73,6 +73,11 @@ pub enum ClientMessage {
     },
 }
 
+pub struct ChatMessage {
+    pub chat_name: Option<String>,
+    pub message: String,
+}
+
 impl ServerMessage {
     pub fn identity(name: &str, public_key: &box_::PublicKey) -> Self {
         ServerMessage::Identity(Identity {
@@ -183,12 +188,21 @@ impl ServerMessage {
 impl ClientMessage {
     pub fn decrypt_chat_message(
         key: &secretbox::Key,
-        message: &[u8],
-        nonce: &secretbox::Nonce,
-    ) -> Result<String> {
-        match secretbox::open(message, nonce, key) {
-            Ok(decrypted) => Ok(std::str::from_utf8(&decrypted)?.into()),
-            Err(_) => Err("Error decrypting message")?,
+        message: &ClientMessage,
+    ) -> Result<ChatMessage> {
+        match message {
+            ClientMessage::ChatMessage {
+                chat_name,
+                message,
+                nonce,
+            } => match secretbox::open(message, nonce, key) {
+                Ok(decrypted) => Ok(ChatMessage {
+                    chat_name: chat_name.clone(),
+                    message: std::str::from_utf8(&decrypted)?.into(),
+                }),
+                Err(_) => Err("Error decrypting message")?,
+            },
+            _ => Err(format!("Expected ChatMessage, got {:?}", message))?,
         }
     }
 }
