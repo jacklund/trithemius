@@ -329,7 +329,14 @@ mod tests {
                         ClientConnector::new(&identity, &name, Some(log.new(o!())));
                     client_connector.connect(stream).await?;
                     client_connector.send_identity().await?;
-                    client_connector.wait_for_peers_message(&keyring).await?;
+                    match client_connector.next_message().await {
+                        Some(message) => {
+                            client_connector
+                                .handle_network_message(&keyring, message?)
+                                .await?
+                        }
+                        None => assert!(false),
+                    };
                     return Ok((client_connector, identity));
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_secs(1)),

@@ -63,6 +63,9 @@ pub enum ClientMessage {
         name: Option<String>,
         key: secretbox::Key,
     },
+    NewChat {
+        chat_name: String,
+    },
     ChatMessage {
         chat_name: Option<String>,
         message: Vec<u8>,
@@ -93,6 +96,19 @@ impl ServerMessage {
             message: encrypted,
             nonce,
         })
+    }
+
+    pub fn new_new_chat_message(server_key: &secretbox::Key, name: &str) -> Result<Self> {
+        let server_nonce = secretbox::gen_nonce();
+        let encrypted = secretbox::seal(
+            &rmp_serde::to_vec(&ClientMessage::NewChat {
+                chat_name: name.into(),
+            })?,
+            &server_nonce,
+            server_key,
+        );
+
+        Self::new_client_message(None, server_nonce, encrypted)
     }
 
     pub fn new_chat_message(

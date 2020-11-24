@@ -47,6 +47,7 @@ pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     event_receiver: Option<Receiver<Event>>,
     pub connection: Option<FramedConnection<T>>,
     chat_keys: HashMap<Option<String>, secretbox::Key>,
+    chat_list: Vec<String>,
     log: Logger,
 }
 
@@ -69,6 +70,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             event_receiver: Some(event_receiver),
             connection: None,
             chat_keys: HashMap::new(),
+            chat_list: vec![],
             log,
         }
     }
@@ -80,32 +82,44 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         Ok(())
     }
 
-    pub async fn wait_for_peers_message(&mut self, keyring: &keyring::KeyRing) -> Result<()> {
-        loop {
-            debug!(self.log, "Waiting for Peers message...");
-            match self.next_message().await {
-                // Handle the Peers message
-                Some(Ok(ServerMessage::Peers(peers))) => {
-                    debug!(self.log, "Got Peers message, peers = {:?}", peers);
-                    if peers.is_empty() {
-                        debug!(self.log, "Generating server key");
-                        self.chat_keys.insert(None, secretbox::gen_key());
-                    } else {
-                        for peer in peers {
-                            debug!(self.log, "Adding peer {}", peer.name);
-                            self.add_peer(keyring, &peer)?;
-                        }
-                    }
-                    let peer_list =
-                        Event::PeerList(self.peers.values().map(|p| p.clone()).collect());
-                    debug!(self.log, "Sending PeerList event: {:?}", peer_list);
-                    self.event_sender.send(peer_list)?;
-                    break;
+    pub async fn create_chat(&mut self, chat_name: String, recipients: &[&str]) -> Result<()> {
+        if self.server_key().is_none() {
+            Err("Don't have server key")?;
+        }
+
+        if self.chat_list.contains(&chat_name) {
+            return Err(format!("Chat name {} already exists", chat_name))?;
+        }
+
+        // Send NewChat message to everyone
+        // TODO: Send chat list to new peers joining
+        self.send_message(ServerMessage::new_new_chat_message(
+            self.server_key().unwrap(),
+            &chat_name,
+        )?)
+        .await?;
+
+        let chat_key = secretbox::gen_key();
+
+        // Add chat key
+        self.chat_keys
+            .insert(Some(chat_name.clone()), chat_key.clone());
+
+        // Send chat invite to all recipients
+        for recipient in recipients.iter() {
+            match self.peers.get(&recipient.to_string()) {
+                Some(peer) => {
+                    let public_key = peer.identity.public_key.clone();
+                    self.send_message(ServerMessage::new_chat_invite(
+                        Some(chat_name.clone().into()),
+                        &public_key,
+                        &self.identity.secret_key,
+                        recipient,
+                        &chat_key,
+                    )?)
+                    .await?
                 }
-                _ => {
-                    // TODO: Log(?) and ignore any other message
-                    unimplemented!()
-                }
+                None => error!(self.log, "No public key found for recipient {}", recipient),
             }
         }
 
@@ -242,16 +256,33 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         Ok(())
     }
 
-    fn add_peer(&mut self, keyring: &keyring::KeyRing, identity: &Identity) -> Result<()> {
-        let contact = keyring
+    fn add_peer(
+        &mut self,
+        keyring: &keyring::KeyRing,
+        identity: &Identity,
+    ) -> Result<Option<keyring::Contact>> {
+        // See if there's a corresponding contact
+        let contact_opt = keyring
             .find_contact(&identity.public_key)
             .map(|c| c.clone());
-        self.peers
-            .insert(identity.name.clone(), Peer::new(identity.clone(), contact));
-        Ok(())
+
+        // Add the peer
+        self.peers.insert(
+            identity.name.clone(),
+            Peer::new(identity.clone(), contact_opt.clone()),
+        );
+
+        // If we found a contact, inform the client
+        if let Some(contact) = contact_opt.clone() {
+            self.event_sender.send(Event::ContactFound {
+                contact,
+                chat_name: None,
+            })?;
+        }
+        Ok(contact_opt)
     }
 
-    async fn handle_network_message(
+    pub async fn handle_network_message(
         &mut self,
         keyring: &keyring::KeyRing,
         message: ServerMessage,
@@ -278,12 +309,25 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 None => Err("Unable to decrypt ClientMessage: no server key")?,
             },
             ServerMessage::Peers(peer_list) => {
-                for peer in peer_list {
-                    self.add_peer(keyring, &peer)?;
+                debug!(self.log, "Got Peers message, peers = {:?}", peer_list);
+                if peer_list.is_empty() {
+                    debug!(self.log, "Generating server key");
+                    self.chat_keys.insert(None, secretbox::gen_key());
+                } else {
+                    for peer in peer_list {
+                        debug!(self.log, "Adding peer {}", peer.name);
+                        self.add_peer(keyring, &peer)?;
+                    }
                 }
+                let peer_list = Event::PeerList(self.peers.values().map(|p| p.clone()).collect());
+                debug!(self.log, "Sending PeerList event: {:?}", peer_list);
+                self.event_sender.send(peer_list)?;
                 Ok(())
             }
-            ServerMessage::PeerJoined(identity) => Ok(self.add_peer(keyring, &identity)?),
+            ServerMessage::PeerJoined(identity) => {
+                self.add_peer(keyring, &identity)?;
+                Ok(())
+            }
             ServerMessage::PeerDisconnected(name) => {
                 self.peers.remove(&name);
                 Ok(())
@@ -454,7 +498,14 @@ mod tests {
 
         // Receive peers message
         let keyring = keyring::KeyRing::default();
-        client_connector.wait_for_peers_message(&keyring).await?;
+        match client_connector.next_message().await {
+            Some(message) => {
+                client_connector
+                    .handle_network_message(&keyring, message?)
+                    .await?
+            }
+            None => assert!(false),
+        };
 
         assert!(client_connector.server_key().is_some());
 
@@ -476,7 +527,14 @@ mod tests {
 
         // Receive peers message
         let keyring = keyring::KeyRing::default();
-        client_connector.wait_for_peers_message(&keyring).await?;
+        match client_connector.next_message().await {
+            Some(message) => {
+                client_connector
+                    .handle_network_message(&keyring, message?)
+                    .await?
+            }
+            None => assert!(false),
+        };
 
         debug!(log, "Waiting for event");
         match client_connector.recv_event().await {
@@ -514,7 +572,14 @@ mod tests {
         // Receive peers message
         let mut keyring = keyring::KeyRing::default();
         keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
-        client_connector.wait_for_peers_message(&keyring).await?;
+        match client_connector.next_message().await {
+            Some(message) => {
+                client_connector
+                    .handle_network_message(&keyring, message?)
+                    .await?
+            }
+            None => assert!(false),
+        };
         let _peer_list_event = client_connector.recv_event().await;
 
         // Send chat invite
@@ -564,7 +629,14 @@ mod tests {
 
         // Receive peers message
         let keyring = keyring::KeyRing::default();
-        client_connector.wait_for_peers_message(&keyring).await?;
+        match client_connector.next_message().await {
+            Some(message) => {
+                client_connector
+                    .handle_network_message(&keyring, message?)
+                    .await?
+            }
+            None => assert!(false),
+        };
         let _peer_list_event = client_connector.recv_event().await;
 
         // Send chat invite
@@ -615,7 +687,14 @@ mod tests {
         let mut keyring = keyring::KeyRing::default();
         keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
         keyring.add_contact(&keyring::Contact::new("barfoo", &vec![baz.public_key]));
-        client_connector.wait_for_peers_message(&keyring).await?;
+        match client_connector.next_message().await {
+            Some(message) => {
+                client_connector
+                    .handle_network_message(&keyring, message?)
+                    .await?
+            }
+            None => assert!(false),
+        };
         let _peer_list_event = client_connector.recv_event().await;
 
         let server_key = secretbox::gen_key();
@@ -669,6 +748,60 @@ mod tests {
 
         assert!(client_connector.server_key().is_some());
         assert_eq!(server_key, *client_connector.server_key().unwrap());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connector_can_read_and_send_messages_using_server_key() -> Result<()> {
+        let (log, path, client_sender, mut client_receiver) = setup()?;
+
+        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
+        client_connector.send_identity().await?;
+        client_receiver.recv().await; // Identity
+
+        // Send peers message
+        let (bar, bar_secret_key) = new_identity("bar");
+        let (baz, _) = new_identity("baz");
+        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
+        match client_connector.next_message().await {
+            Some(message) => {
+                client_connector
+                    .handle_network_message(&keyring, message?)
+                    .await?
+            }
+            None => assert!(false),
+        };
+        let _peer_list_event = client_connector.recv_event().await;
+
+        let server_key = secretbox::gen_key();
+        let public_key = &client_connector.identity.public_key;
+        let mut chat_invite =
+            ServerMessage::new_chat_invite(None, public_key, &bar_secret_key, "foo", &server_key)?;
+        if let ServerMessage::ChatInvite {
+            ref mut sender,
+            ref recipient,
+            ref message,
+            ref nonce,
+        } = chat_invite
+        {
+            *sender = Some("bar".into());
+        };
+        client_sender.send(chat_invite)?;
+
+        // Handle the chat invite
+        match client_connector.next_message().await {
+            Some(message) => {
+                client_connector
+                    .handle_network_message(&keyring, message?)
+                    .await?
+            }
+            None => assert!(false),
+        };
 
         Ok(())
     }
