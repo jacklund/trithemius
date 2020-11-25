@@ -1,4 +1,4 @@
-use crate::{ClientMessage, Identity, Result};
+use crate::{ChatInvite, ClientMessage, Identity, Result};
 use sodiumoxide::crypto::{box_, secretbox};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -96,7 +96,7 @@ impl ServerMessage {
     ) -> Result<Self> {
         let nonce = box_::gen_nonce();
         let encrypted = box_::seal(
-            &rmp_serde::to_vec(&ClientMessage::ChatInvite {
+            &rmp_serde::to_vec(&ChatInvite {
                 name,
                 key: chat_key.clone(),
             })?,

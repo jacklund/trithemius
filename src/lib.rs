@@ -35,10 +35,6 @@ impl Identity {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ClientMessage {
-    ChatInvite {
-        name: Option<String>,
-        key: secretbox::Key,
-    },
     NewChat {
         chat_name: String,
     },
@@ -47,6 +43,12 @@ pub enum ClientMessage {
         message: Vec<u8>,
         nonce: secretbox::Nonce,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ChatInvite {
+    name: Option<String>,
+    key: secretbox::Key,
 }
 
 pub struct ChatMessage {

@@ -1,5 +1,5 @@
 use crate::{
-    keyring, ClientMessage, FramedConnection, Identity, Receiver, Result, Sender, ServerMessage,
+    keyring, ChatInvite, FramedConnection, Identity, Receiver, Result, Sender, ServerMessage,
 };
 use futures::StreamExt;
 use slog::{debug, error, o, Discard, Logger};
@@ -137,7 +137,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         sender: &str,
         message: &[u8],
         nonce: &box_::Nonce,
-    ) -> Option<ClientMessage> {
+    ) -> Option<ChatInvite> {
         debug!(self.log, "Looking up sender {}", sender);
         match self.peers.get(sender) {
             Some(peer) => {
@@ -408,7 +408,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 );
                 if let Some(client_message) = client_message_opt {
                     match client_message {
-                        ClientMessage::ChatInvite { name, key } => match name {
+                        ChatInvite { name, key } => match name {
                             None => match self.chat_keys.get(&name) {
                                 Some(_) => {
                                     debug!(self.log, "Got ChatInvite when we already have key");
@@ -438,6 +438,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ClientMessage;
     use futures::SinkExt;
     use rand::distributions::Alphanumeric;
     use rand::{thread_rng, Rng};
