@@ -35,7 +35,7 @@ impl Identity {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum ClientMessage {
-    NewChat {
+    CreateChat {
         chat_name: String,
     },
     ChatMessage {
@@ -51,12 +51,40 @@ pub struct ChatInvite {
     key: secretbox::Key,
 }
 
+impl ChatInvite {
+    pub fn new(name: Option<String>, key: &secretbox::Key) -> Self {
+        Self {
+            name,
+            key: key.clone(),
+        }
+    }
+}
+
 pub struct ChatMessage {
     pub chat_name: Option<String>,
     pub message: String,
 }
 
 impl ClientMessage {
+    pub fn new_create_chat_message(chat_name: &str) -> Self {
+        Self::CreateChat {
+            chat_name: chat_name.to_string(),
+        }
+    }
+
+    pub fn new_chat_message(
+        chat_name: Option<String>,
+        key: &secretbox::Key,
+        message: &str,
+    ) -> Result<Self> {
+        let nonce = secretbox::gen_nonce();
+        Ok(Self::ChatMessage {
+            chat_name,
+            message: secretbox::seal(message.as_bytes(), &nonce, key),
+            nonce,
+        })
+    }
+
     pub fn decrypt_chat_message(
         key: &secretbox::Key,
         message: &ClientMessage,

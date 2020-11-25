@@ -391,12 +391,10 @@ mod tests {
 
         // Server should disconnect, so next message attempt should fail
         assert!(connector
-            .send_message(ServerMessage::new_chat_message(
-                &session_key,
-                &session_key,
-                None,
+            .send_message(ServerMessage::new_client_message(
                 Some(vec!["foo".into()]),
-                "Hello",
+                &ClientMessage::new_chat_message(None, &session_key, "Hello",)?,
+                &session_key,
             )?)
             .await
             .is_err());
@@ -425,12 +423,10 @@ mod tests {
 
         // Send message from one
         framed2
-            .send_message(ServerMessage::new_chat_message(
-                &session_key,
-                &session_key,
-                None,
+            .send_message(ServerMessage::new_client_message(
                 Some(vec!["foo".into()]),
-                "Hello",
+                &ClientMessage::new_chat_message(None, &session_key, "Hello")?,
+                &session_key,
             )?)
             .await?;
 
@@ -509,12 +505,10 @@ mod tests {
 
         // One client sends broadcast message
         framed2
-            .send_message(ServerMessage::new_chat_message(
-                &session_key,
-                &session_key,
+            .send_message(ServerMessage::new_client_message(
                 None,
-                None,
-                "Hello",
+                &ClientMessage::new_chat_message(None, &session_key, "Hello")?,
+                &session_key,
             )?)
             .await?;
 
@@ -579,12 +573,10 @@ mod tests {
 
         // Server should disconnect, so next message attempt should fail
         assert!(framed2
-            .send_message(ServerMessage::new_chat_message(
-                &session_key,
-                &session_key,
-                None,
+            .send_message(ServerMessage::new_client_message(
                 Some(vec!["foo".into()]),
-                "Hello",
+                &ClientMessage::new_chat_message(None, &session_key, "Hello",)?,
+                &session_key,
             )?)
             .await
             .is_err());

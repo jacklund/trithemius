@@ -1,5 +1,6 @@
 use crate::{
-    keyring, ChatInvite, FramedConnection, Identity, Receiver, Result, Sender, ServerMessage,
+    keyring, ChatInvite, ClientMessage, FramedConnection, Identity, Receiver, Result, Sender,
+    ServerMessage,
 };
 use futures::StreamExt;
 use slog::{debug, error, o, Discard, Logger};
@@ -95,9 +96,10 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
 
         // Send NewChat message to everyone
         // TODO: Send chat list to new peers joining
-        self.send_message(ServerMessage::new_new_chat_message(
+        self.send_message(ServerMessage::new_client_message(
+            Some(recipients.iter().map(|r| r.to_string()).collect()),
+            &ClientMessage::new_create_chat_message(&chat_name),
             self.server_key().unwrap(),
-            &chat_name,
         )?)
         .await?;
 
@@ -210,7 +212,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                     )?)
                     .await?)
             }
-            None => Err("Don't have server key yet")?,
+            None => Err("Don't have chat key yet")?,
         }
     }
 
@@ -250,12 +252,10 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             None => Err("Server key not found")?,
         };
 
-        self.send_message(ServerMessage::new_chat_message(
-            &server_key,
-            &chat_key,
-            chat_name,
+        self.send_message(ServerMessage::new_client_message(
             recipients,
-            message,
+            &ClientMessage::new_chat_message(chat_name, &chat_key, message)?,
+            &server_key,
         )?)
         .await?;
 

@@ -41,50 +41,18 @@ impl ServerMessage {
 
     pub fn new_client_message(
         recipients: Option<Vec<String>>,
-        nonce: secretbox::Nonce,
-        encrypted: Vec<u8>,
+        message: &ClientMessage,
+        server_key: &secretbox::Key,
     ) -> Result<Self> {
+        let nonce = secretbox::gen_nonce();
+        let encrypted = secretbox::seal(&rmp_serde::to_vec(message)?, &nonce, server_key);
+
         Ok(Self::ClientMessage {
             sender: None,
             recipients,
             message: encrypted,
             nonce,
         })
-    }
-
-    pub fn new_new_chat_message(server_key: &secretbox::Key, name: &str) -> Result<Self> {
-        let server_nonce = secretbox::gen_nonce();
-        let encrypted = secretbox::seal(
-            &rmp_serde::to_vec(&ClientMessage::NewChat {
-                chat_name: name.into(),
-            })?,
-            &server_nonce,
-            server_key,
-        );
-
-        Self::new_client_message(None, server_nonce, encrypted)
-    }
-
-    pub fn new_chat_message(
-        server_key: &secretbox::Key,
-        chat_key: &secretbox::Key,
-        chat_name: Option<String>,
-        recipients: Option<Vec<String>>,
-        message: &str,
-    ) -> Result<Self> {
-        let chat_nonce = secretbox::gen_nonce();
-        let encrypted = secretbox::seal(message.as_bytes(), &chat_nonce, chat_key);
-        let server_nonce = secretbox::gen_nonce();
-        let encrypted_chat_message = secretbox::seal(
-            &rmp_serde::to_vec(&ClientMessage::ChatMessage {
-                chat_name: chat_name.into(),
-                message: encrypted,
-                nonce: chat_nonce,
-            })?,
-            &server_nonce,
-            server_key,
-        );
-        Self::new_client_message(recipients, server_nonce, encrypted_chat_message)
     }
 
     pub fn new_chat_invite(
@@ -96,10 +64,7 @@ impl ServerMessage {
     ) -> Result<Self> {
         let nonce = box_::gen_nonce();
         let encrypted = box_::seal(
-            &rmp_serde::to_vec(&ChatInvite {
-                name,
-                key: chat_key.clone(),
-            })?,
+            &rmp_serde::to_vec(&ChatInvite::new(name, chat_key))?,
             &nonce,
             public_key,
             secret_key,
