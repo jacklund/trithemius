@@ -11,7 +11,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_serde::formats::SymmetricalMessagePack;
-use trithemius::{Identity, Receiver, Result, Sender, ServerMessage};
+use trithemius::{server_message::ServerMessage, Identity, Receiver, Result, Sender};
 
 type PeerMap = HashMap<String, Sender<ServerMessage>>;
 type ClientMap = HashMap<String, Identity>;
