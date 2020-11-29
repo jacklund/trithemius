@@ -94,8 +94,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             return Err(format!("Chat name {} already exists", chat_name))?;
         }
 
-        // Send NewChat message to everyone
-        // TODO: Send chat list to new peers joining
+        // Send CreateChat message to everyone
         self.send_message(ServerMessage::new_client_message(
             Some(self.peers.keys().map(|r| r.to_string()).collect()),
             &ClientMessage::new_create_chat_message(&chat_name),
@@ -541,6 +540,43 @@ mod tests {
         (Identity::new(name, &public_key), secret_key)
     }
 
+    async fn setup_client_connector(
+        path: &str,
+        log: &Logger,
+        client_receiver: &mut Receiver<ServerMessage>,
+    ) -> Result<ClientConnector<UnixStream>> {
+        let mut client_connector = connect(path.to_string(), "foo", log.new(o!())).await?;
+        client_connector.send_identity().await?;
+        client_receiver.recv().await; // Identity
+
+        Ok(client_connector)
+    }
+
+    async fn send_peers_message(
+        mut client_connector: &mut ClientConnector<UnixStream>,
+        client_sender: &Sender<ServerMessage>,
+        add_contact: bool,
+    ) -> Result<(
+        keyring::KeyRing,
+        Identity,
+        box_::SecretKey,
+        Identity,
+        box_::SecretKey,
+    )> {
+        let (bar, bar_secret_key) = new_identity("bar");
+        let (baz, baz_secret_key) = new_identity("baz");
+        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        if add_contact {
+            keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
+        }
+        handle_message(&mut client_connector, &keyring).await?;
+
+        Ok((keyring, bar, bar_secret_key, baz, baz_secret_key))
+    }
+
     async fn handle_message(
         client_connector: &mut ClientConnector<UnixStream>,
         keyring: &keyring::KeyRing,
@@ -557,9 +593,8 @@ mod tests {
     async fn connector_generates_key_with_no_peers() -> Result<()> {
         let (log, path, client_sender, mut client_receiver) = setup()?;
 
-        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
-        client_connector.send_identity().await?;
-        client_receiver.recv().await; // Identity
+        let mut client_connector =
+            setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send empty peers message
         client_sender.send(ServerMessage::Peers(vec![]))?;
@@ -577,18 +612,12 @@ mod tests {
     async fn connector_generates_peerlist_event_with_peers_present() -> Result<()> {
         let (log, path, client_sender, mut client_receiver) = setup()?;
 
-        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
-        client_connector.send_identity().await?;
-        client_receiver.recv().await; // Identity
+        let mut client_connector =
+            setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (bar, _) = new_identity("bar");
-        let (baz, _) = new_identity("baz");
-        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
-
-        // Receive peers message
-        let keyring = keyring::KeyRing::default();
-        handle_message(&mut client_connector, &keyring).await?;
+        let (keyring, bar, _, baz, _) =
+            send_peers_message(&mut client_connector, &client_sender, false).await?;
 
         debug!(log, "Waiting for event");
         match client_connector.recv_event().await {
@@ -614,9 +643,8 @@ mod tests {
     async fn connector_uses_server_key_from_chat_invite() -> Result<()> {
         let (log, path, client_sender, mut client_receiver) = setup()?;
 
-        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
-        client_connector.send_identity().await?;
-        client_receiver.recv().await; // Identity
+        let mut client_connector =
+            setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
         let (bar, secret_key) = new_identity("bar");
@@ -664,18 +692,12 @@ mod tests {
     async fn connector_ignores_server_key_from_peer_not_in_contact_list() -> Result<()> {
         let (log, path, client_sender, mut client_receiver) = setup()?;
 
-        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
-        client_connector.send_identity().await?;
-        client_receiver.recv().await; // Identity
+        let mut client_connector =
+            setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (bar, secret_key) = new_identity("bar");
-        let (baz, _) = new_identity("baz");
-        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
-
-        // Receive peers message
-        let keyring = keyring::KeyRing::default();
-        handle_message(&mut client_connector, &keyring).await?;
+        let (keyring, bar, secret_key, baz, _) =
+            send_peers_message(&mut client_connector, &client_sender, false).await?;
 
         // Send chat invite
         let server_key = secretbox::gen_key();
@@ -705,21 +727,12 @@ mod tests {
     async fn connector_handles_same_server_key_sent_multiple_times() -> Result<()> {
         let (log, path, client_sender, mut client_receiver) = setup()?;
 
-        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
-        client_connector.send_identity().await?;
-        client_receiver.recv().await; // Identity
+        let mut client_connector =
+            setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (bar, bar_secret_key) = new_identity("bar");
-        let (baz, baz_secret_key) = new_identity("baz");
-        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
-
-        // Receive peers message
-        let mut keyring = keyring::KeyRing::default();
-        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
-        keyring.add_contact(&keyring::Contact::new("barfoo", &vec![baz.public_key]));
-        handle_message(&mut client_connector, &keyring).await?;
-        let _peer_list_event = client_connector.recv_event().await;
+        let (keyring, bar, bar_secret_key, baz, baz_secret_key) =
+            send_peers_message(&mut client_connector, &client_sender, true).await?;
 
         let server_key = secretbox::gen_key();
         let public_key = &client_connector.identity.public_key;
@@ -766,19 +779,12 @@ mod tests {
     async fn connector_can_read_and_send_messages_using_server_key() -> Result<()> {
         let (log, path, client_sender, mut client_receiver) = setup()?;
 
-        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
-        client_connector.send_identity().await?;
-        client_receiver.recv().await; // Identity
+        let mut client_connector =
+            setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (bar, bar_secret_key) = new_identity("bar");
-        let (baz, _) = new_identity("baz");
-        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
-
-        // Receive peers message
-        let mut keyring = keyring::KeyRing::default();
-        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
-        handle_message(&mut client_connector, &keyring).await?;
+        let (keyring, bar, bar_secret_key, baz, _) =
+            send_peers_message(&mut client_connector, &client_sender, true).await?;
 
         let server_key = secretbox::gen_key();
         let public_key = &client_connector.identity.public_key;
@@ -821,19 +827,12 @@ mod tests {
     async fn connector_cant_create_chat_without_server_key() -> Result<()> {
         let (log, path, client_sender, mut client_receiver) = setup()?;
 
-        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
-        client_connector.send_identity().await?;
-        client_receiver.recv().await; // Identity
+        let mut client_connector =
+            setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (bar, bar_secret_key) = new_identity("bar");
-        let (baz, _) = new_identity("baz");
-        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
-
-        // Receive peers message
-        let mut keyring = keyring::KeyRing::default();
-        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
-        handle_message(&mut client_connector, &keyring).await?;
+        let (keyring, bar, bar_secret_key, baz, _) =
+            send_peers_message(&mut client_connector, &client_sender, true).await?;
 
         assert_eq!(
             "Don't have server key",
@@ -851,19 +850,12 @@ mod tests {
     async fn connector_creates_chat() -> Result<()> {
         let (log, path, client_sender, mut client_receiver) = setup()?;
 
-        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
-        client_connector.send_identity().await?;
-        client_receiver.recv().await; // Identity
+        let mut client_connector =
+            setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (bar, bar_secret_key) = new_identity("bar");
-        let (baz, _) = new_identity("baz");
-        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
-
-        // Receive peers message
-        let mut keyring = keyring::KeyRing::default();
-        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
-        handle_message(&mut client_connector, &keyring).await?;
+        let (keyring, bar, bar_secret_key, baz, _) =
+            send_peers_message(&mut client_connector, &client_sender, true).await?;
 
         let server_key = secretbox::gen_key();
         let public_key = &client_connector.identity.public_key;
