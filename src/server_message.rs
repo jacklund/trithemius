@@ -97,4 +97,26 @@ impl ServerMessage {
             _ => Err("Not a ClientMessage")?,
         }
     }
+
+    pub fn decrypt_chat_invite(
+        public_key: &box_::PublicKey,
+        secret_key: &box_::SecretKey,
+        message: &ServerMessage,
+    ) -> Result<ChatInvite> {
+        match message {
+            ServerMessage::ChatInvite {
+                sender: _,
+                recipient: _,
+                message,
+                nonce,
+            } => {
+                let decrypted = match box_::open(&message, nonce, public_key, secret_key) {
+                    Ok(decrypted) => decrypted,
+                    Err(_) => Err("Error decrypting message")?,
+                };
+                Ok(rmp_serde::from_read_ref(&decrypted)?)
+            }
+            _ => Err("Not a ClientMessage")?,
+        }
+    }
 }

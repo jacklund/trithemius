@@ -97,7 +97,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         // Send NewChat message to everyone
         // TODO: Send chat list to new peers joining
         self.send_message(ServerMessage::new_client_message(
-            Some(recipients.iter().map(|r| r.to_string()).collect()),
+            Some(self.peers.keys().map(|r| r.to_string()).collect()),
             &ClientMessage::new_create_chat_message(&chat_name),
             self.server_key().unwrap(),
         )?)
@@ -813,6 +813,130 @@ mod tests {
             )?
             .message
         );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connector_cant_create_chat_without_server_key() -> Result<()> {
+        let (log, path, client_sender, mut client_receiver) = setup()?;
+
+        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
+        client_connector.send_identity().await?;
+        client_receiver.recv().await; // Identity
+
+        // Send peers message
+        let (bar, bar_secret_key) = new_identity("bar");
+        let (baz, _) = new_identity("baz");
+        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
+        handle_message(&mut client_connector, &keyring).await?;
+
+        assert_eq!(
+            "Don't have server key",
+            client_connector
+                .create_chat("new_chat".to_string(), &["bar"])
+                .await
+                .unwrap_err()
+                .to_string()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connector_creates_chat() -> Result<()> {
+        let (log, path, client_sender, mut client_receiver) = setup()?;
+
+        let mut client_connector = connect(path.clone(), "foo", log.new(o!())).await?;
+        client_connector.send_identity().await?;
+        client_receiver.recv().await; // Identity
+
+        // Send peers message
+        let (bar, bar_secret_key) = new_identity("bar");
+        let (baz, _) = new_identity("baz");
+        client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
+        handle_message(&mut client_connector, &keyring).await?;
+
+        let server_key = secretbox::gen_key();
+        let public_key = &client_connector.identity.public_key;
+        let mut chat_invite =
+            ServerMessage::new_chat_invite(None, public_key, &bar_secret_key, "foo", &server_key)?;
+        if let ServerMessage::ChatInvite {
+            ref mut sender,
+            ref recipient,
+            ref message,
+            ref nonce,
+        } = chat_invite
+        {
+            *sender = Some("bar".into());
+        };
+        client_sender.send(chat_invite)?;
+
+        // Handle the chat invite
+        handle_message(&mut client_connector, &keyring).await?;
+
+        client_connector
+            .create_chat("new_chat".to_string(), &["bar"])
+            .await?;
+
+        // Make sure all peers get CreateChat
+        let server_msg = client_receiver.recv().await.unwrap();
+        match server_msg {
+            ServerMessage::ClientMessage {
+                sender: _,
+                ref recipients,
+                message: _,
+                nonce: _,
+            } => {
+                let mut sorted = recipients.clone().unwrap().clone();
+                sorted.sort();
+                assert_eq!(sorted, vec!["bar".to_string(), "baz".to_string()],);
+            }
+            _ => assert!(false),
+        };
+        match ServerMessage::get_client_message(&server_key, &server_msg.clone())? {
+            ClientMessage::CreateChat { chat_name } => assert_eq!("new_chat", chat_name),
+            _ => assert!(false),
+        };
+
+        // Make sure recipient gets ChatInvite
+        let server_msg = client_receiver.recv().await.unwrap();
+        match server_msg {
+            ServerMessage::ChatInvite {
+                sender: _,
+                ref recipient,
+                message: _,
+                nonce: _,
+            } => {
+                assert_eq!(recipient.clone(), "bar".to_string());
+            }
+            _ => assert!(false),
+        };
+        match ServerMessage::decrypt_chat_invite(
+            &client_connector.identity.public_key,
+            &bar_secret_key,
+            &server_msg.clone(),
+        )? {
+            ChatInvite { name, key } => {
+                assert_eq!("new_chat", name.unwrap());
+                assert_eq!(
+                    *client_connector
+                        .chat_keys
+                        .get(&Some("new_chat".to_string()))
+                        .unwrap(),
+                    key
+                );
+            }
+            _ => assert!(false),
+        };
 
         Ok(())
     }
