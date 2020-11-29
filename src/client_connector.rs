@@ -577,6 +577,31 @@ mod tests {
         Ok((keyring, bar, bar_secret_key, baz, baz_secret_key))
     }
 
+    async fn send_chat_invite(
+        mut client_connector: &mut ClientConnector<UnixStream>,
+        client_sender: &Sender<ServerMessage>,
+        keyring: &keyring::KeyRing,
+        public_key: &box_::PublicKey,
+        secret_key: &box_::SecretKey,
+        server_key: &secretbox::Key,
+    ) -> Result<()> {
+        let mut chat_invite =
+            ServerMessage::new_chat_invite(None, public_key, secret_key, "foo", server_key)?;
+        if let ServerMessage::ChatInvite {
+            ref mut sender,
+            ref recipient,
+            ref message,
+            ref nonce,
+        } = chat_invite
+        {
+            *sender = Some("bar".into());
+        };
+        client_sender.send(chat_invite)?;
+
+        // Handle the chat invite
+        Ok(handle_message(&mut client_connector, &keyring).await?)
+    }
+
     async fn handle_message(
         client_connector: &mut ClientConnector<UnixStream>,
         keyring: &keyring::KeyRing,
@@ -665,22 +690,16 @@ mod tests {
 
         // Send chat invite
         let server_key = secretbox::gen_key();
-        let public_key = &client_connector.identity.public_key;
-        let mut chat_invite =
-            ServerMessage::new_chat_invite(None, public_key, &secret_key, "foo", &server_key)?;
-        if let ServerMessage::ChatInvite {
-            ref mut sender,
-            ref recipient,
-            ref message,
-            ref nonce,
-        } = chat_invite
-        {
-            *sender = Some("bar".into());
-        };
-        client_sender.send(chat_invite)?;
-
-        // Handle the chat invite
-        handle_message(&mut client_connector, &keyring).await?;
+        let public_key = &client_connector.identity.public_key.clone();
+        send_chat_invite(
+            &mut client_connector,
+            &client_sender,
+            &keyring,
+            &public_key,
+            &secret_key,
+            &server_key,
+        )
+        .await?;
 
         assert!(client_connector.server_key().is_some());
         assert_eq!(server_key, *client_connector.server_key().unwrap());
@@ -701,22 +720,16 @@ mod tests {
 
         // Send chat invite
         let server_key = secretbox::gen_key();
-        let public_key = &client_connector.identity.public_key;
-        let mut chat_invite =
-            ServerMessage::new_chat_invite(None, public_key, &secret_key, "foo", &server_key)?;
-        if let ServerMessage::ChatInvite {
-            ref mut sender,
-            ref recipient,
-            ref message,
-            ref nonce,
-        } = chat_invite
-        {
-            *sender = Some("bar".into());
-        };
-        client_sender.send(chat_invite)?;
-
-        // Handle the chat invite
-        handle_message(&mut client_connector, &keyring).await?;
+        let public_key = &client_connector.identity.public_key.clone();
+        send_chat_invite(
+            &mut client_connector,
+            &client_sender,
+            &keyring,
+            &public_key,
+            &secret_key,
+            &server_key,
+        )
+        .await?;
 
         assert!(client_connector.server_key().is_none());
 
@@ -735,22 +748,16 @@ mod tests {
             send_peers_message(&mut client_connector, &client_sender, true).await?;
 
         let server_key = secretbox::gen_key();
-        let public_key = &client_connector.identity.public_key;
-        let mut chat_invite =
-            ServerMessage::new_chat_invite(None, public_key, &bar_secret_key, "foo", &server_key)?;
-        if let ServerMessage::ChatInvite {
-            ref mut sender,
-            ref recipient,
-            ref message,
-            ref nonce,
-        } = chat_invite
-        {
-            *sender = Some("bar".into());
-        };
-        client_sender.send(chat_invite)?;
-
-        // Handle the chat invite
-        handle_message(&mut client_connector, &keyring).await?;
+        let public_key = &client_connector.identity.public_key.clone();
+        send_chat_invite(
+            &mut client_connector,
+            &client_sender,
+            &keyring,
+            &public_key,
+            &bar_secret_key,
+            &server_key,
+        )
+        .await?;
 
         let public_key = &client_connector.identity.public_key;
         let mut chat_invite =
@@ -787,22 +794,16 @@ mod tests {
             send_peers_message(&mut client_connector, &client_sender, true).await?;
 
         let server_key = secretbox::gen_key();
-        let public_key = &client_connector.identity.public_key;
-        let mut chat_invite =
-            ServerMessage::new_chat_invite(None, public_key, &bar_secret_key, "foo", &server_key)?;
-        if let ServerMessage::ChatInvite {
-            ref mut sender,
-            ref recipient,
-            ref message,
-            ref nonce,
-        } = chat_invite
-        {
-            *sender = Some("bar".into());
-        };
-        client_sender.send(chat_invite)?;
-
-        // Handle the chat invite
-        handle_message(&mut client_connector, &keyring).await?;
+        let public_key = &client_connector.identity.public_key.clone();
+        send_chat_invite(
+            &mut client_connector,
+            &client_sender,
+            &keyring,
+            &public_key,
+            &bar_secret_key,
+            &server_key,
+        )
+        .await?;
 
         // Send chat message
         client_connector
@@ -858,22 +859,16 @@ mod tests {
             send_peers_message(&mut client_connector, &client_sender, true).await?;
 
         let server_key = secretbox::gen_key();
-        let public_key = &client_connector.identity.public_key;
-        let mut chat_invite =
-            ServerMessage::new_chat_invite(None, public_key, &bar_secret_key, "foo", &server_key)?;
-        if let ServerMessage::ChatInvite {
-            ref mut sender,
-            ref recipient,
-            ref message,
-            ref nonce,
-        } = chat_invite
-        {
-            *sender = Some("bar".into());
-        };
-        client_sender.send(chat_invite)?;
-
-        // Handle the chat invite
-        handle_message(&mut client_connector, &keyring).await?;
+        let public_key = &client_connector.identity.public_key.clone();
+        send_chat_invite(
+            &mut client_connector,
+            &client_sender,
+            &keyring,
+            &public_key,
+            &bar_secret_key,
+            &server_key,
+        )
+        .await?;
 
         client_connector
             .create_chat("new_chat".to_string(), &["bar"])
