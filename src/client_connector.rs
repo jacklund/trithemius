@@ -555,26 +555,12 @@ mod tests {
     async fn send_peers_message(
         mut client_connector: &mut ClientConnector<UnixStream>,
         client_sender: &Sender<ServerMessage>,
-        add_contact: bool,
-    ) -> Result<(
-        keyring::KeyRing,
-        Identity,
-        box_::SecretKey,
-        Identity,
-        box_::SecretKey,
-    )> {
+    ) -> Result<(Identity, box_::SecretKey, Identity, box_::SecretKey)> {
         let (bar, bar_secret_key) = new_identity("bar");
         let (baz, baz_secret_key) = new_identity("baz");
         client_sender.send(ServerMessage::Peers(vec![bar.clone(), baz.clone()]))?;
 
-        // Receive peers message
-        let mut keyring = keyring::KeyRing::default();
-        if add_contact {
-            keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
-        }
-        handle_message(&mut client_connector, &keyring).await?;
-
-        Ok((keyring, bar, bar_secret_key, baz, baz_secret_key))
+        Ok((bar, bar_secret_key, baz, baz_secret_key))
     }
 
     async fn send_chat_invite(
@@ -584,6 +570,7 @@ mod tests {
         public_key: &box_::PublicKey,
         secret_key: &box_::SecretKey,
         server_key: &secretbox::Key,
+        real_sender: &str,
     ) -> Result<()> {
         let mut chat_invite =
             ServerMessage::new_chat_invite(None, public_key, secret_key, "foo", server_key)?;
@@ -594,7 +581,7 @@ mod tests {
             ref nonce,
         } = chat_invite
         {
-            *sender = Some("bar".into());
+            *sender = Some(real_sender.to_string());
         };
         client_sender.send(chat_invite)?;
 
@@ -641,8 +628,11 @@ mod tests {
             setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (keyring, bar, _, baz, _) =
-            send_peers_message(&mut client_connector, &client_sender, false).await?;
+        let (bar, _, baz, _) = send_peers_message(&mut client_connector, &client_sender).await?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        handle_message(&mut client_connector, &keyring).await?;
 
         debug!(log, "Waiting for event");
         match client_connector.recv_event().await {
@@ -698,6 +688,7 @@ mod tests {
             &public_key,
             &secret_key,
             &server_key,
+            "bar",
         )
         .await?;
 
@@ -715,8 +706,12 @@ mod tests {
             setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (keyring, bar, secret_key, baz, _) =
-            send_peers_message(&mut client_connector, &client_sender, false).await?;
+        let (bar, secret_key, baz, _) =
+            send_peers_message(&mut client_connector, &client_sender).await?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        handle_message(&mut client_connector, &keyring).await?;
 
         // Send chat invite
         let server_key = secretbox::gen_key();
@@ -728,6 +723,7 @@ mod tests {
             &public_key,
             &secret_key,
             &server_key,
+            "bar",
         )
         .await?;
 
@@ -744,8 +740,14 @@ mod tests {
             setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (keyring, bar, bar_secret_key, baz, baz_secret_key) =
-            send_peers_message(&mut client_connector, &client_sender, true).await?;
+        let (bar, bar_secret_key, baz, baz_secret_key) =
+            send_peers_message(&mut client_connector, &client_sender).await?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
+        keyring.add_contact(&keyring::Contact::new("barfoo", &vec![baz.public_key]));
+        handle_message(&mut client_connector, &keyring).await?;
 
         let server_key = secretbox::gen_key();
         let public_key = &client_connector.identity.public_key.clone();
@@ -756,25 +758,21 @@ mod tests {
             &public_key,
             &bar_secret_key,
             &server_key,
+            "bar",
         )
         .await?;
 
-        let public_key = &client_connector.identity.public_key;
-        let mut chat_invite =
-            ServerMessage::new_chat_invite(None, public_key, &baz_secret_key, "foo", &server_key)?;
-        if let ServerMessage::ChatInvite {
-            ref mut sender,
-            ref recipient,
-            ref message,
-            ref nonce,
-        } = chat_invite
-        {
-            *sender = Some("baz".into());
-        };
-        client_sender.send(chat_invite)?;
-
-        // Handle the chat invite
-        handle_message(&mut client_connector, &keyring).await?;
+        let public_key = &client_connector.identity.public_key.clone();
+        send_chat_invite(
+            &mut client_connector,
+            &client_sender,
+            &keyring,
+            &public_key,
+            &baz_secret_key,
+            &server_key,
+            "baz",
+        )
+        .await?;
 
         assert!(client_connector.server_key().is_some());
         assert_eq!(server_key, *client_connector.server_key().unwrap());
@@ -790,8 +788,13 @@ mod tests {
             setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (keyring, bar, bar_secret_key, baz, _) =
-            send_peers_message(&mut client_connector, &client_sender, true).await?;
+        let (bar, bar_secret_key, baz, _) =
+            send_peers_message(&mut client_connector, &client_sender).await?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
+        handle_message(&mut client_connector, &keyring).await?;
 
         let server_key = secretbox::gen_key();
         let public_key = &client_connector.identity.public_key.clone();
@@ -802,6 +805,7 @@ mod tests {
             &public_key,
             &bar_secret_key,
             &server_key,
+            "bar",
         )
         .await?;
 
@@ -832,8 +836,13 @@ mod tests {
             setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (keyring, bar, bar_secret_key, baz, _) =
-            send_peers_message(&mut client_connector, &client_sender, true).await?;
+        let (bar, bar_secret_key, baz, _) =
+            send_peers_message(&mut client_connector, &client_sender).await?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
+        handle_message(&mut client_connector, &keyring).await?;
 
         assert_eq!(
             "Don't have server key",
@@ -855,8 +864,13 @@ mod tests {
             setup_client_connector(&path, &log, &mut client_receiver).await?;
 
         // Send peers message
-        let (keyring, bar, bar_secret_key, baz, _) =
-            send_peers_message(&mut client_connector, &client_sender, true).await?;
+        let (bar, bar_secret_key, baz, _) =
+            send_peers_message(&mut client_connector, &client_sender).await?;
+
+        // Receive peers message
+        let mut keyring = keyring::KeyRing::default();
+        keyring.add_contact(&keyring::Contact::new("foobar", &vec![bar.public_key]));
+        handle_message(&mut client_connector, &keyring).await?;
 
         let server_key = secretbox::gen_key();
         let public_key = &client_connector.identity.public_key.clone();
@@ -867,6 +881,7 @@ mod tests {
             &public_key,
             &bar_secret_key,
             &server_key,
+            "bar",
         )
         .await?;
 
