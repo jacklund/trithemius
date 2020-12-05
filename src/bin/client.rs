@@ -42,7 +42,6 @@ fn parse_line(line: String) -> Result<Event> {
     };
     Ok(Event::ChatMessage {
         chat_name: None,
-        recipients: dest,
         message: msg,
     })
 }
@@ -131,12 +130,12 @@ async fn main() -> Result<()> {
                 None => identity_name,
             };
             let identity = match keyring.get_identity(&identity_name) {
-                Some(ref identity) => identity.clone(),
+                Some(identity) => identity.clone(),
                 None => Err(format!("Couldn't find identity '{}'", name))?,
             };
-            let (mut event_sender, connector_receiver) = mpsc::unbounded_channel();
+            let (event_sender, connector_receiver) = mpsc::unbounded_channel();
             let (connector_sender, mut event_receiver) = mpsc::unbounded_channel();
-            let server_key = keyring.get_key(&address).map(|k| k.clone());
+            let server_key = keyring.get_key(&address).cloned();
             let my_keyring = keyring.clone();
             tokio::task::spawn(connect_and_run(
                 name.into(),
@@ -153,7 +152,7 @@ async fn main() -> Result<()> {
                 let mut lines_from_stdin = BufReader::new(stdin()).lines().fuse();
 
                 select! {
-                    event = event_receiver.recv() => unimplemented!(),
+                    _event = event_receiver.recv() => unimplemented!(),
                     line = lines_from_stdin.next() => match line {
                         Some(line) => event_sender.send(parse_line(line?)?)?,
                         None => break,

@@ -73,7 +73,7 @@ impl ServerMessage {
             sender: None,
             recipient: recipient.into(),
             message: encrypted,
-            nonce: nonce,
+            nonce,
         })
     }
 

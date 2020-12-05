@@ -233,9 +233,7 @@ async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
             Event::Message(message) => handle_chat_message(&log, &mut peers, &message)?,
             Event::NewPeer { client_id, sender } => {
                 debug!(log, "Broker got NewPeer for {}", client_id.name);
-                sender.send(ServerMessage::Peers(
-                    client_map.values().map(|i| i.clone()).collect(),
-                ))?;
+                sender.send(ServerMessage::Peers(client_map.values().cloned().collect()))?;
                 client_map.insert(client_id.name.clone(), client_id.clone());
                 for sender in peers.values() {
                     sender.send(ServerMessage::PeerJoined(client_id.clone()))?;
