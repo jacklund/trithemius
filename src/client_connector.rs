@@ -54,7 +54,7 @@ pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     connector_receiver: Receiver<Event>,
     connector_sender: Sender<Event>,
     event_receiver: Option<Receiver<Event>>,
-    pub connection: Option<FramedConnection<T>>,
+    connection: Option<FramedConnection<T>>,
     chat_keys: HashMap<Option<String>, secretbox::Key>,
     chat_list: Vec<String>,
     chat_members: HashMap<String, Vec<String>>,
