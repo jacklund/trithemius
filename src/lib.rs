@@ -1,16 +1,15 @@
 #[macro_use]
 extern crate serde_derive;
 
-use futures::SinkExt;
+use client_message::ClientMessage;
+use framed_connection::FramedClientConnection;
 use server_message::ServerMessage;
 use sodiumoxide::crypto::{box_, hash, pwhash, secretbox};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
-use tokio_serde::formats::SymmetricalMessagePack;
-use tokio_util::codec::{BytesCodec, Framed};
 
 pub mod client_connector;
+pub mod client_message;
+pub mod framed_connection;
 pub mod keyring;
 pub mod server_message;
 
@@ -33,114 +32,78 @@ impl Identity {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub enum ClientMessage {
-    CreateChat {
-        chat_name: String,
-    },
-    ChatMessage {
-        chat_name: Option<String>,
-        message: Vec<u8>,
-        nonce: secretbox::Nonce,
-    },
-}
+// #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+// pub enum ClientMessage {
+//     CreateChat {
+//         chat_name: String,
+//     },
+//     ChatMessage {
+//         chat_name: Option<String>,
+//         message: Vec<u8>,
+//         nonce: secretbox::Nonce,
+//     },
+// }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ChatInvite {
-    name: Option<String>,
-    key: secretbox::Key,
-}
+// #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+// pub struct ChatInvite {
+//     name: Option<String>,
+//     key: secretbox::Key,
+// }
+//
+// impl ChatInvite {
+//     pub fn new(name: Option<String>, key: &secretbox::Key) -> Self {
+//         Self {
+//             name,
+//             key: key.clone(),
+//         }
+//     }
+// }
+//
+// pub struct ChatMessage {
+//     pub chat_name: Option<String>,
+//     pub message: String,
+// }
 
-impl ChatInvite {
-    pub fn new(name: Option<String>, key: &secretbox::Key) -> Self {
-        Self {
-            name,
-            key: key.clone(),
-        }
-    }
-}
-
-pub struct ChatMessage {
-    pub chat_name: Option<String>,
-    pub message: String,
-}
-
-impl ClientMessage {
-    pub fn new_create_chat_message(chat_name: &str) -> Self {
-        Self::CreateChat {
-            chat_name: chat_name.to_string(),
-        }
-    }
-
-    pub fn new_chat_message(
-        chat_name: Option<String>,
-        key: &secretbox::Key,
-        message: &str,
-    ) -> Result<Self> {
-        let nonce = secretbox::gen_nonce();
-        Ok(Self::ChatMessage {
-            chat_name,
-            message: secretbox::seal(message.as_bytes(), &nonce, key),
-            nonce,
-        })
-    }
-
-    pub fn decrypt_chat_message(
-        key: &secretbox::Key,
-        message: &ClientMessage,
-    ) -> Result<ChatMessage> {
-        match message {
-            ClientMessage::ChatMessage {
-                chat_name,
-                message,
-                nonce,
-            } => match secretbox::open(message, nonce, key) {
-                Ok(decrypted) => Ok(ChatMessage {
-                    chat_name: chat_name.clone(),
-                    message: std::str::from_utf8(&decrypted)?.into(),
-                }),
-                Err(_) => Err("Error decrypting message")?,
-            },
-            _ => Err(format!("Expected ChatMessage, got {:?}", message))?,
-        }
-    }
-}
-
-pub struct FramedConnection<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
-    framed: tokio_serde::Framed<
-        tokio_util::codec::Framed<T, tokio_util::codec::BytesCodec>,
-        ServerMessage,
-        ServerMessage,
-        tokio_serde::formats::MessagePack<ServerMessage, ServerMessage>,
-    >,
-}
-
-impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> FramedConnection<T> {
-    pub fn new(connection: T) -> Self {
-        Self {
-            framed: tokio_serde::SymmetricallyFramed::new(
-                tokio_util::codec::Framed::new(connection, tokio_util::codec::BytesCodec::new()),
-                SymmetricalMessagePack::<ServerMessage>::default(),
-            ),
-        }
-    }
-
-    pub fn get_mut(&mut self) -> &mut Framed<T, BytesCodec> {
-        self.framed.get_mut()
-    }
-
-    pub async fn send(&mut self, message: ServerMessage) -> Result<()> {
-        Ok(self.framed.send(message).await?)
-    }
-
-    pub async fn next(&mut self) -> Option<Result<ServerMessage>> {
-        match self.framed.next().await {
-            None => None,
-            Some(Ok(message)) => Some(Ok(message)),
-            Some(Err(error)) => Err(error).ok()?,
-        }
-    }
-}
+// impl ClientMessage {
+//     pub fn new_create_chat_message(chat_name: &str) -> Self {
+//         Self::CreateChat {
+//             chat_name: chat_name.to_string(),
+//         }
+//     }
+//
+//     pub fn new_chat_message(
+//         chat_name: Option<String>,
+//         key: &secretbox::Key,
+//         message: &str,
+//     ) -> Result<Self> {
+//         let nonce = secretbox::gen_nonce();
+//         Ok(Self::ChatMessage {
+//             chat_name,
+//             message: secretbox::seal(message.as_bytes(), &nonce, key),
+//             nonce,
+//         })
+//     }
+//
+//     pub fn decrypt_chat_message(
+//         key: &secretbox::Key,
+//         message: &ClientMessage,
+//     ) -> Result<ChatMessage> {
+//         match message {
+//             ClientMessage::ChatMessage {
+//                 chat_name,
+//                 message,
+//                 nonce,
+//             } => match secretbox::open(message, nonce, key) {
+//                 Ok(decrypted) => Ok(ChatMessage {
+//                     chat_name: chat_name.clone(),
+//                     message: std::str::from_utf8(&decrypted)?.into(),
+//                 }),
+//                 Err(_) => Err("Error decrypting message")?,
+//             },
+//             _ => Err(format!("Expected ChatMessage, got {:?}", message))?,
+//         }
+//     }
+// }
 
 fn derive_file_encryption_key(password: &str, salt: &pwhash::Salt) -> Result<secretbox::Key> {
     // Buffer

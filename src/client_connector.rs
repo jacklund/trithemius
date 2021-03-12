@@ -1,10 +1,11 @@
 use crate::{
-    keyring, ChatInvite, ChatMessage, ClientMessage, FramedConnection, Identity, Receiver, Result,
-    Sender, ServerMessage,
+    client_message::ChatMessage, client_message::DirectMessage,
+    framed_connection::new_client_connection, keyring, ClientMessage, FramedClientConnection,
+    Identity, Receiver, Result, Sender, ServerMessage,
 };
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use slog::{debug, error, o, Discard, Logger};
-use sodiumoxide::crypto::{box_, secretbox};
+use sodiumoxide::crypto::{box_, secretbox, sign};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::select;
@@ -29,21 +30,16 @@ pub enum Event {
         chat_name: Option<String>,
         message: String,
     },
+    DirectMessage {
+        sender: String,
+        message: String,
+    },
     PeerList(Vec<Peer>),
     ContactFound {
         contact: keyring::Contact,
         chat_name: Option<String>,
     },
     Error(String),
-}
-
-impl From<ChatMessage> for Event {
-    fn from(chat_msg: ChatMessage) -> Self {
-        Self::ChatMessage {
-            chat_name: chat_msg.chat_name,
-            message: chat_msg.message,
-        }
-    }
 }
 
 pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
@@ -54,15 +50,14 @@ pub struct ClientConnector<T: AsyncRead + AsyncWrite + std::marker::Unpin> {
     connector_receiver: Receiver<Event>,
     connector_sender: Sender<Event>,
     event_receiver: Option<Receiver<Event>>,
-    connection: Option<FramedConnection<T>>,
+    connection: FramedClientConnection<T>,
     chat_keys: HashMap<Option<String>, secretbox::Key>,
-    chat_list: Vec<String>,
-    chat_members: HashMap<String, Vec<String>>,
+    chat_name_map: HashMap<Option<String>, String>,
     log: Logger,
 }
 
 impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
-    pub fn new(identity: &keyring::Identity, name: &str, log: Option<Logger>) -> Self {
+    fn new(stream: T, identity: &keyring::Identity, name: &str, log: Option<Logger>) -> Self {
         let (event_sender, connector_receiver) = mpsc::unbounded_channel();
         let (connector_sender, event_receiver) = mpsc::unbounded_channel();
         let mut log = match log {
@@ -78,116 +73,37 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
             connector_receiver,
             connector_sender,
             event_receiver: Some(event_receiver),
-            connection: None,
+            connection: new_client_connection(stream),
             chat_keys: HashMap::new(),
-            chat_list: vec![],
-            chat_members: HashMap::new(),
+            chat_name_map: HashMap::new(),
             log,
         }
     }
 
-    pub async fn connect(&mut self, stream: T) -> Result<()> {
-        self.connection = Some(FramedConnection::new(stream));
-
-        Ok(())
-    }
-
-    pub async fn send_identity(&mut self) -> Result<()> {
+    async fn send_identity(&mut self) -> Result<()> {
         debug!(self.log, "Sending identity to server");
         Ok(self
-            .send_message(ServerMessage::identity(
-                &self.name.clone(),
+            .send_message(ClientMessage::Identity(Identity::new(
+                &self.name,
                 &self.identity.public_key,
-            ))
+            )))
             .await?)
     }
 
-    pub async fn create_chat(&mut self, chat_name: String, recipients: &[&str]) -> Result<()> {
-        if self.server_key().is_none() {
-            Err("Don't have server key")?;
-        }
-
-        if self.chat_list.contains(&chat_name) {
-            return Err(format!("Chat name {} already exists", chat_name))?;
-        }
-
-        // Send CreateChat message to everyone
-        self.send_message(ServerMessage::new_client_message(
-            Some(self.peers.keys().map(|r| r.to_string()).collect()),
-            &ClientMessage::new_create_chat_message(&chat_name),
-            self.server_key().unwrap(),
-        )?)
-        .await?;
-
-        let chat_key = secretbox::gen_key();
-
-        // Add chat key
-        self.chat_keys
-            .insert(Some(chat_name.clone()), chat_key.clone());
-
-        // Send chat invite to all recipients
-        for recipient in recipients.iter() {
-            match self.peers.get(&recipient.to_string()) {
-                Some(peer) => {
-                    let public_key = peer.identity.public_key;
-                    self.send_message(ServerMessage::new_chat_invite(
-                        Some(chat_name.clone().into()),
-                        &public_key,
-                        &self.identity.secret_key,
-                        recipient,
-                        &chat_key,
-                    )?)
-                    .await?
-                }
-                None => error!(self.log, "No public key found for recipient {}", recipient),
-            }
-        }
-
-        Ok(())
+    // NOTE: The 'a here is to get around https://github.com/rust-lang/rust/issues/63033
+    pub async fn connect<'a>(
+        stream: T,
+        identity: &'a keyring::Identity,
+        name: &'a str,
+        log: Option<Logger>,
+    ) -> Result<Self> {
+        let mut connector = Self::new(stream, identity, name, log);
+        connector.send_identity().await?;
+        Ok(connector)
     }
 
     fn server_key(&self) -> Option<&secretbox::Key> {
         self.chat_keys.get(&None)
-    }
-
-    async fn decrypt_chat_invite(
-        &self,
-        sender: &str,
-        message: &[u8],
-        nonce: &box_::Nonce,
-    ) -> Option<ChatInvite> {
-        debug!(self.log, "Looking up sender {}", sender);
-        match self.peers.get(sender) {
-            Some(peer) => {
-                debug!(self.log, "Sender is {:?}", peer.contact);
-                match peer.contact {
-                    Some(_) => {
-                        match box_::open(
-                            &message,
-                            nonce,
-                            &peer.identity.public_key,
-                            &self.identity.secret_key,
-                        ) {
-                            Ok(decrypted) => match rmp_serde::from_read_ref(&decrypted) {
-                                Ok(message) => Some(message),
-                                Err(error) => {
-                                    error!(self.log, "Error decoding message: {}", error);
-                                    None
-                                }
-                            },
-                            Err(_) => {
-                                error!(self.log, "Error decrypting message");
-                                None
-                            }
-                        }
-                    }
-                    None => None,
-                }
-            }
-            // If we can't find the sender in our peers list, or if they're not in our contacts,
-            // we can't authenticate the message
-            _ => None,
-        }
     }
 
     pub async fn recv_event(&mut self) -> Option<Event> {
@@ -198,88 +114,17 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         Ok(self.connector_sender.send(event)?)
     }
 
-    pub async fn send_chat_invite(
-        &mut self,
-        public_key: &box_::PublicKey,
-        recipient: &str,
-        chat_name: Option<String>,
-    ) -> Result<()> {
-        debug!(self.log, "Sending chat invite");
-        match self.chat_keys.get(&chat_name) {
-            Some(chat_key) => {
-                let chat_key = chat_key.clone();
-                Ok(self
-                    .send_message(ServerMessage::new_chat_invite(
-                        None,
-                        public_key,
-                        &self.identity.secret_key,
-                        recipient,
-                        &chat_key,
-                    )?)
-                    .await?)
-            }
-            None => Err("Don't have chat key yet")?,
-        }
-    }
-
-    pub async fn send_server_chat_message(
-        &mut self,
-        message: &str,
-        recipients: Option<Vec<String>>,
-    ) -> Result<()> {
-        self._send_chat_message(None, message, recipients).await
-    }
-
-    pub async fn send_chat_message(&mut self, chat_name: &str, message: &str) -> Result<()> {
-        let chat_members = match self.chat_members.get(chat_name) {
-            Some(chat_members) => chat_members.clone(),
-            None => Err(format!("Not member of chat {}", chat_name))?,
-        };
-        self._send_chat_message(Some(chat_name.to_string()), message, Some(chat_members))
-            .await
-    }
-
-    async fn _send_chat_message(
-        &mut self,
-        chat_name: Option<String>,
-        message: &str,
-        recipients: Option<Vec<String>>,
-    ) -> Result<()> {
-        let chat_key = match self.chat_keys.get(&chat_name) {
-            Some(chat_key) => chat_key.clone(),
-            None => match chat_name {
-                Some(ref chat_name) => Err(format!("No chat key found for {}", chat_name))?,
-                None => Err("Server key not found")?,
-            },
-        };
-
-        let server_key = match self.server_key() {
-            Some(server_key) => server_key.clone(),
-            None => Err("Server key not found")?,
-        };
-
-        self.send_message(ServerMessage::new_client_message(
-            recipients,
-            &ClientMessage::new_chat_message(chat_name, &chat_key, message)?,
-            &server_key,
-        )?)
-        .await?;
-
-        Ok(())
-    }
-
-    pub async fn send_message(&mut self, message: ServerMessage) -> Result<()> {
-        match &mut self.connection {
-            Some(connection) => Ok(connection.send(message).await?),
-            None => Err("Must call connect first")?,
-        }
+    pub async fn send_message(&mut self, message: ClientMessage) -> Result<()> {
+        unimplemented!()
+        // Ok(self.connection.send(message).await?)
     }
 
     pub async fn next_message(&mut self) -> Option<Result<ServerMessage>> {
-        match &mut self.connection {
-            Some(connection) => connection.next().await.map(|r| r.map_err(|e| e)),
-            None => Some(Err("Must call connect first".into())),
-        }
+        unimplemented!()
+        // self.connection
+        //     .next()
+        //     .await
+        //     .map(|r| r.map_err(|e| e.into()))
     }
 
     pub async fn handle_events(mut self, keyring: &keyring::KeyRing) -> Result<()> {
@@ -290,16 +135,16 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 // Read from network
                 message_opt = self.next_message() => {
                     match message_opt {
-                        Some(result) => self.handle_network_message(
+                        Some(server_message_result) => self.handle_network_message(
                             keyring,
-                            result?
+                            server_message_result?
                         ).await?,
                         None => break,
                     }
                 },
 
                 // Read events from client
-                event = event_receiver.next() => match event {
+                event = event_receiver.recv() => match event {
                     Some(Event::ChatMessage { chat_name, message }) => unimplemented!(),
                     Some(Event::ContactFound { contact, chat_name }) => unimplemented!(),
                     Some(_) => unimplemented!(),
@@ -312,6 +157,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         Ok(())
     }
 
+    // Add peer to peers list, check in contact list, and let client know if client found
     fn add_peer(&mut self, keyring: &keyring::KeyRing, identity: &Identity) -> Result<()> {
         // See if there's a corresponding contact
         let contact_opt = keyring.find_contact(&identity.public_key).cloned();
@@ -337,66 +183,87 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         Ok(self.event_sender.send(event)?)
     }
 
-    fn handle_client_message(&mut self, server_client_message: &ServerMessage) -> Result<()> {
-        match self.server_key() {
-            Some(server_key) => {
-                let client_msg =
-                    ServerMessage::get_client_message(&server_key, &server_client_message)?;
-                match client_msg {
-                    ClientMessage::CreateChat { chat_name } => unimplemented!(),
-                    ClientMessage::ChatMessage {
-                        ref chat_name,
-                        message: _,
-                        nonce: _,
-                    } => match self.chat_keys.get(chat_name) {
-                        Some(chat_key) => {
-                            let chat_msg =
-                                ClientMessage::decrypt_chat_message(chat_key, &client_msg)?;
-                            self.send_event_to_client(chat_msg.into())?;
-                            Ok(())
-                        }
-                        None => Err(format!(
-                            "No chat key found for message from chat name {}",
-                            chat_name.clone().unwrap()
-                        ))?,
-                    },
-                }
+    async fn handle_direct_message(
+        &mut self,
+        sender: String,
+        encrypted: &[u8],
+        nonce: &box_::Nonce,
+    ) -> Result<()> {
+        let sender_public_key = match self.get_sender_public_key(&sender) {
+            Some(public_key) => public_key,
+            None => Err(format!("Unable to access public key of {}", sender))?,
+        };
+        let message = DirectMessage::decrypt(
+            encrypted,
+            nonce,
+            &self.identity.secret_key,
+            &sender_public_key,
+        )?;
+
+        match message {
+            DirectMessage::Message(message) => {
+                self.send_event(Event::DirectMessage { sender, message })?
             }
-            None => Err("No server key found")?,
+            DirectMessage::ChatKeyRequest { chat_name } => unimplemented!(),
+            DirectMessage::ChatKey {
+                chat_name,
+                chat_key,
+            } => unimplemented!(),
+            DirectMessage::ChatKeyRequestError { message } => unimplemented!(),
+        }
+
+        unimplemented!()
+    }
+
+    async fn handle_chat_message(
+        &mut self,
+        sender: String,
+        list_name: Option<String>,
+        encrypted: &[u8],
+        nonce: &secretbox::Nonce,
+        signature: &sign::Signature,
+    ) -> Result<()> {
+        let chat_key = match list_name {
+            Some(list_name) => match self.chat_name_map.get(&Some(list_name.clone())) {
+                Some(chat_name) => match self.chat_keys.get(&Some(chat_name.clone())) {
+                    Some(chat_key) => chat_key,
+                    None => Err(format!("No chat key found for chat_name {}", chat_name))?,
+                },
+                None => Err(format!("Unknown list name {}", list_name.clone()))?,
+            },
+            None => match self.chat_keys.get(&None) {
+                Some(key) => key,
+                None => Err("No server key found")?,
+            },
+        };
+
+        let sender_public_key = match self.get_sender_public_key(&sender) {
+            Some(public_key) => public_key,
+            None => Err(format!("No public key found for sender {}", sender))?,
+        };
+
+        match ChatMessage::decrypt_and_verify(
+            encrypted,
+            nonce,
+            signature,
+            chat_key,
+            &sender_public_key,
+        ) {
+            Ok(message) => match message {
+                ChatMessage::Message(message) => unimplemented!(),
+            },
+            Err(err) => Err(err)?,
         }
     }
 
-    async fn handle_chat_invite(
-        &mut self,
-        sender: Option<String>,
-        message: &[u8],
-        nonce: &box_::Nonce,
-    ) -> Result<()> {
-        // Try to decrypt the outer wrapper using my secret key
-        let chat_invite_opt = match sender {
-            Some(sender) => self.decrypt_chat_invite(&sender, &message, &nonce).await,
-            None => None,
-        };
-        debug!(
-            self.log,
-            "Unwrapped client message is {:?}", chat_invite_opt
-        );
-        if let Some(ChatInvite { name, key }) = chat_invite_opt {
-            match name {
-                None => match self.chat_keys.get(&name) {
-                    Some(_) => {
-                        debug!(self.log, "Got ChatInvite when we already have key");
-                        Ok(())
-                    }
-                    None => {
-                        self.chat_keys.insert(name, key);
-                        Ok(())
-                    }
-                },
-                _ => unimplemented!(),
+    fn get_sender_public_key(&self, sender: &str) -> Option<box_::PublicKey> {
+        debug!(self.log, "Looking up sender {}", sender);
+        match self.peers.get(sender) {
+            Some(peer) => {
+                debug!(self.log, "Sender is {:?}", peer.contact);
+                Some(peer.identity.public_key)
             }
-        } else {
-            Ok(())
+            _ => None,
         }
     }
 
@@ -407,7 +274,7 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
     ) -> Result<()> {
         debug!(self.log, "Got Peers message, peers = {:?}", peer_list);
         if peer_list.is_empty() {
-            debug!(self.log, "Generating server key");
+            debug!(self.log, "I'm the first, generating server key");
             self.chat_keys.insert(None, secretbox::gen_key());
         } else {
             for peer in peer_list {
@@ -415,6 +282,8 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
                 self.add_peer(keyring, &peer)?;
             }
         }
+
+        // Send current peer list to client in case they want to display it
         self.send_event_to_client(Event::PeerList(self.peers.values().cloned().collect()))?;
         Ok(())
     }
@@ -425,27 +294,33 @@ impl<T: AsyncRead + AsyncWrite + std::marker::Unpin> ClientConnector<T> {
         message: ServerMessage,
     ) -> Result<()> {
         match message {
-            ServerMessage::Identity(_) => panic!("Unexpected Identity message"),
-            server_client_message @ ServerMessage::ClientMessage { .. } => {
-                self.handle_client_message(&server_client_message)
-            }
             ServerMessage::Peers(peer_list) => self.handle_peers_message(keyring, &peer_list),
+            ServerMessage::IdentityTaken { name } => {
+                println!("Name {} is taken, please use a different one", name);
+                Ok(())
+            }
             ServerMessage::PeerJoined(identity) => self.add_peer(keyring, &identity),
             ServerMessage::PeerDisconnected(name) => {
                 self.peers.remove(&name);
                 Ok(())
             }
-            ServerMessage::IdentityTaken { name } => {
-                println!("Name {} is taken, please use a different one", name);
-                Ok(())
-            }
-            ServerMessage::ChatInvite {
+            ServerMessage::DirectMessage {
                 sender,
-                recipient: _,
-                message,
+                recipient,
+                encrypted,
                 nonce,
-            } => self.handle_chat_invite(sender, &message, &nonce).await,
-            ServerMessage::ErrorMessage(error) => {
+            } => self.handle_direct_message(sender, &encrypted, &nonce).await,
+            ServerMessage::ChatMessage {
+                sender,
+                list_name,
+                encrypted,
+                nonce,
+                signature,
+            } => {
+                self.handle_chat_message(sender, list_name, &encrypted, &nonce, &signature)
+                    .await
+            }
+            ServerMessage::Error(error) => {
                 println!("error: {}", error);
                 Ok(())
             } // something => panic!("Unexpected message: {:?}", something),

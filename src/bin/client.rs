@@ -4,8 +4,8 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use tokio::io::{stdin, AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::select;
-use tokio::stream::StreamExt;
 use tokio::sync::mpsc;
+use tokio_stream::{wrappers::LinesStream, StreamExt};
 use trithemius::{
     client_connector::{ClientConnector, Event},
     keyring, Receiver, Result, Sender,
@@ -19,11 +19,14 @@ async fn connect_and_run(
     connector_sender: Sender<Event>,
     server_key: Option<keyring::Key>,
     keyring: keyring::KeyRing,
-) -> Result<()> {
-    let mut client_connector = ClientConnector::new(&identity, &name, None);
-    Ok(client_connector
-        .connect(TcpStream::connect(socket_addr).await?)
-        .await?)
+) -> Result<ClientConnector<TcpStream>> {
+    Ok(ClientConnector::connect(
+        TcpStream::connect(socket_addr).await?,
+        &identity,
+        &name,
+        None,
+    )
+    .await?)
 }
 
 fn parse_line(line: String) -> Result<Event> {
@@ -149,7 +152,7 @@ async fn main() -> Result<()> {
             .await??;
             loop {
                 // Set up terminal I/O
-                let mut lines_from_stdin = BufReader::new(stdin()).lines().fuse();
+                let mut lines_from_stdin = LinesStream::new(BufReader::new(stdin()).lines());
 
                 select! {
                     _event = event_receiver.recv() => unimplemented!(),

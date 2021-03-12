@@ -10,8 +10,10 @@ use tokio::net::TcpListener;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::task;
-use tokio_serde::formats::SymmetricalMessagePack;
-use trithemius::{server_message::ServerMessage, Identity, Receiver, Result, Sender};
+use trithemius::{
+    client_message::ClientMessage, framed_connection::new_server_connection,
+    server_message::ServerMessage, Identity, Receiver, Result, Sender,
+};
 
 type PeerMap = HashMap<String, Sender<ServerMessage>>;
 type ClientMap = HashMap<String, Identity>;
@@ -98,10 +100,10 @@ where
 
 async fn read_client_identity<R>(log: &Logger, framed: &mut R) -> Result<Identity>
 where
-    R: Stream<Item = std::result::Result<ServerMessage, std::io::Error>> + std::marker::Unpin,
+    R: Stream<Item = std::result::Result<ClientMessage, std::io::Error>> + std::marker::Unpin,
 {
     match framed.next().await {
-        Some(Ok(ServerMessage::Identity(identity))) => Ok(identity),
+        Some(Ok(ClientMessage::Identity(identity))) => Ok(identity),
         Some(Ok(something)) => {
             error!(log, "Got unexpected message {:?}, disconnecting", something);
             Err("Unexpected message type")?
@@ -120,10 +122,7 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
     log = log.new(o!("peer_addr" => peer_addr));
 
     // Set up network I/O
-    let mut framed = tokio_serde::SymmetricallyFramed::new(
-        tokio_util::codec::Framed::new(stream, tokio_util::codec::BytesCodec::new()),
-        SymmetricalMessagePack::<ServerMessage>::default(),
-    );
+    let mut framed = new_server_connection(stream);
 
     // Read client name
     let client_id = read_client_identity(&log, &mut framed).await?;
@@ -152,10 +151,36 @@ async fn handle_connection<T: AsyncRead + AsyncWrite + std::marker::Unpin>(
                 debug!(log, "Got {:?} from client", message_opt);
                 match message_opt {
                     Some(Ok(message)) => match message {
-                        ServerMessage::ErrorMessage(_) => broker.send(Event::Message(message))?,
-                        ServerMessage::ClientMessage{ sender: _, recipients, message, nonce } =>
-                            broker.send(Event::Message(ServerMessage::ClientMessage{ sender: Some(client_id.name.clone()), recipients, message, nonce }))?,
-                        something => panic!("Unexpected message {:?}", something),
+                        // Already handled above
+                        ClientMessage::Identity(identity) =>
+                            info!(log, "Client {} sent duplicate identity message, ignoring: {:?}",
+                                client_id.name,
+                                identity),
+
+                        // Request peers list
+                        ClientMessage::PeersRequest => unimplemented!(),
+
+                        // Request chat list
+                        ClientMessage::ChatListRequest => unimplemented!(),
+
+                        // DM
+                        ClientMessage::DirectMessage { recipient, encrypted, nonce } =>
+                            broker.send(Event::Message(ServerMessage::DirectMessage {
+                                sender: client_id.name.clone(),
+                                recipient,
+                                encrypted,
+                                nonce
+                            }))?,
+
+                        // Chat to list
+                        ClientMessage::ChatMessage { list_name, encrypted, nonce, signature } =>
+                            broker.send(Event::Message(ServerMessage::ChatMessage {
+                                sender: client_id.name.clone(),
+                                list_name,
+                                encrypted,
+                                nonce,
+                                signature
+                            }))?,
                     },
                     Some(Err(error)) => Err(error)?,
                     None => break,
@@ -223,28 +248,50 @@ fn add_peer(
 }
 
 async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
+    // Used to find the broker channel corresponding to the given client
     let mut peers = PeerMap::new();
+
+    // Used to look up client identities by alias
     let mut client_map = ClientMap::new();
 
     debug!(log, "Starting broker event loop");
-    while let Some(event) = events.next().await {
+    while let Some(event) = events.recv().await {
         debug!(log, "Got broker event {:?}", event);
         match event {
-            Event::Message(message) => handle_chat_message(&log, &mut peers, &message)?,
+            Event::Message(message) => match message {
+                ServerMessage::ChatMessage {
+                    sender,
+                    list_name,
+                    encrypted,
+                    nonce,
+                    signature,
+                } => unimplemented!(),
+                ServerMessage::DirectMessage {
+                    sender,
+                    recipient,
+                    encrypted,
+                    nonce,
+                } => unimplemented!(),
+                _ => error!(log, "Broker got unexpected ServerMessage: {:?}", message),
+            },
             Event::NewPeer { client_id, sender } => {
                 debug!(log, "Broker got NewPeer for {}", client_id.name);
+                // Send peer identities to new client
                 sender.send(ServerMessage::Peers(client_map.values().cloned().collect()))?;
+                // Add new client to map
                 client_map.insert(client_id.name.clone(), client_id.clone());
+                // Send PeerJoined to all other clients
                 for sender in peers.values() {
                     sender.send(ServerMessage::PeerJoined(client_id.clone()))?;
                 }
+                // Add the new peer to the peers list
                 add_peer(&log, &mut peers, &client_id.name, sender)?;
             }
             Event::PeerDisconnected { name } => {
                 peers.remove(&name);
                 client_map.remove(&name);
                 for sender in peers.values() {
-                    sender.send(ServerMessage::peer_disconnected(&name))?;
+                    sender.send(ServerMessage::PeerDisconnected(name.clone()))?;
                 }
             }
         }
@@ -258,47 +305,49 @@ async fn broker_loop(log: Logger, mut events: Receiver<Event>) -> Result<()> {
 
 fn handle_chat_message(log: &Logger, peers: &mut PeerMap, message: &ServerMessage) -> Result<()> {
     debug!(log, "Got message {:?}", message);
-    match message {
-        ServerMessage::ClientMessage {
-            ref sender,
-            ref recipients,
-            message: ref _msg,
-            nonce: ref _nonce,
-        } => {
-            match recipients {
-                // Send to recipients directly
-                Some(recipients) => {
-                    debug!(log, "Recipient list: {:?}", recipients);
-                    for addr in recipients {
-                        match peers.get_mut(addr) {
-                            Some(peer) => peer.send(message.clone())?,
-                            None => {
-                                // Notify sender that one of the recipients wasn't found
-                                if let Some(sender) = peers.get_mut(&sender.clone().unwrap()) {
-                                    sender.send(ServerMessage::ErrorMessage(format!(
-                                        "from server: no client '{}' found",
-                                        addr
-                                    )))?;
-                                }
-                            }
-                        }
-                    }
-                }
-                // Broadcast
-                None => {
-                    debug!(log, "Got broadcast message");
-                    for (name, peer) in peers.iter() {
-                        if *name != sender.clone().unwrap() {
-                            peer.send(message.clone())?;
-                        }
-                    }
-                }
-            }
-        }
-        _ => panic!("Unexpected message type!"),
-    };
-
-    Ok(())
+    unimplemented!()
+    // match message {
+    //     ServerMessage::ChatMessage {
+    //         ref sender,
+    //         list_name,
+    //         encrypted,
+    //         nonce,
+    //         signature,
+    //     } => {
+    //         match recipients {
+    //             // Send to recipients directly
+    //             Some(recipients) => {
+    //                 debug!(log, "Recipient list: {:?}", recipients);
+    //                 for addr in recipients {
+    //                     match peers.get_mut(addr) {
+    //                         Some(peer) => peer.send(message.clone())?,
+    //                         None => {
+    //                             // Notify sender that one of the recipients wasn't found
+    //                             if let Some(sender) = peers.get_mut(&sender.clone().unwrap()) {
+    //                                 sender.send(ServerMessage::ErrorMessage(format!(
+    //                                     "from server: no client '{}' found",
+    //                                     addr
+    //                                 )))?;
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //             // Broadcast
+    //             None => {
+    //                 debug!(log, "Got broadcast message");
+    //                 for (name, peer) in peers.iter() {
+    //                     if *name != sender.clone().unwrap() {
+    //                         peer.send(message.clone())?;
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     _ => panic!("Unexpected message type!"),
+    // };
+    //
+    // Ok(())
 }
 
 #[cfg(test)]
@@ -310,7 +359,9 @@ mod tests {
     use sodiumoxide::crypto::secretbox;
     use std::path::Path;
     use tokio::net::{UnixListener, UnixStream};
-    use trithemius::{client_connector::ClientConnector, keyring, ClientMessage, Identity};
+    use trithemius::{
+        client_connector::ClientConnector, client_message::ClientMessage, keyring, Identity,
+    };
 
     // Connect a client to a Unix socket
     async fn connect_client<P: AsRef<Path>>(
@@ -324,9 +375,8 @@ mod tests {
                 Ok(stream) => {
                     let keyring = keyring::KeyRing::default();
                     let mut client_connector =
-                        ClientConnector::new(&identity, &name, Some(log.new(o!())));
-                    client_connector.connect(stream).await?;
-                    client_connector.send_identity().await?;
+                        ClientConnector::connect(stream, &identity, &name, Some(log.new(o!())))
+                            .await?;
                     match client_connector.next_message().await {
                         Some(message) => {
                             client_connector
